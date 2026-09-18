@@ -1,0 +1,384 @@
+"""
+AI Features — Sprint 5.
+Quiz generation, flashcard generation, and lecture summarisation.
+All use GPT-4o with structured JSON output via the RAG retriever for context.
+"""
+from __future__ import annotations
+
+import json
+import re
+import uuid
+from typing import Any
+
+from llama_index.core.schema import QueryBundle
+
+from app.agents.llm_factory import get_embed_model, get_llm
+from app.config import get_settings
+from app.logging_config import get_logger
+from app.retrieval.retriever import SearchScope, ScopedHybridRetriever
+from app.retrieval.typesense_client import get_typesense_client
+
+log = get_logger(__name__)
+
+
+# ── Context retrieval helper ───────────────────────────────────────────────
+
+def _retrieve_context(
+    query: str,
+    module_id: str | None   = None,
+    week_id: str | None     = None,
+    document_id: str | None = None,
+    student_id: str         = "",
+    top_k: int              = 20,
+) -> tuple[str, int]:
+    """
+    Retrieve relevant chunks for a module/week/document.
+    Returns (context_text, chunk_count).
+    For summarisation we use a high top_k to get comprehensive coverage.
+    """
+    embed_model = get_embed_model()
+    scope       = SearchScope(
+        student_id=student_id,
+        module_id=module_id,
+        week_id=week_id,
+        current_semester_only=False,  # features should work across semesters
+        latest_only=True,
+        include_class=True,
+        include_personal=True,
+    )
+
+    retriever = ScopedHybridRetriever(
+        embed_model=embed_model,
+        scope=scope,
+        top_k=top_k,
+        score_threshold=0.0,  # for features, include all content not just top hits
+    )
+
+    query_bundle     = QueryBundle(query_str=query)
+    nodes_with_score = retriever.retrieve(query_bundle)
+
+    parts = []
+    for nws in nodes_with_score:
+        meta   = nws.node.metadata
+        fname  = meta.get("filename", "doc")
+        cidx   = meta.get("chunk_index", 0)
+        parts.append(f"[{fname}, chunk {cidx}]\n{nws.node.text}")
+
+    context = "\n\n".join(parts)
+    return context, len(nodes_with_score)
+
+
+def _call_llm_json(prompt: str) -> Any:
+    """
+    Call GPT-4o and parse the JSON response.
+    Strips markdown code fences if present.
+    """
+    llm      = get_llm()
+    response = llm.complete(prompt)
+    raw      = str(response).strip()
+
+    # Strip markdown code fences
+    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+    raw = re.sub(r"\s*```$", "", raw)
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        log.error("llm_json_parse_error", error=str(e), raw=raw[:200])
+        raise ValueError(f"LLM returned invalid JSON: {e}") from e
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Quiz Generator
+# ═══════════════════════════════════════════════════════════════════════════
+
+QUIZ_PROMPT = """\
+You are an expert educator creating a quiz to test student understanding.
+
+Using ONLY the content provided below, generate exactly {count} {q_type} questions.
+
+Rules:
+- Base every question strictly on the provided content — no outside knowledge.
+- Each question must have a clear, unambiguous correct answer.
+- Explanations must cite which part of the content the answer comes from.
+- For MCQ: provide exactly 4 options labelled a, b, c, d.
+- For true_false: options are only ["True", "False"].
+- For short_answer: no options needed.
+
+Return ONLY a valid JSON array (no markdown, no preamble):
+[
+  {{
+    "question": "...",
+    "options": [{{"id": "a", "text": "..."}}, ...],
+    "correct_answer": "a",
+    "explanation": "...",
+    "source_chunk": "brief quote from content that supports the answer"
+  }},
+  ...
+]
+
+Content:
+{context}
+"""
+
+
+def generate_quiz(
+    module_id: str | None   = None,
+    week_id: str | None     = None,
+    document_id: str | None = None,
+    student_id: str         = "",
+    question_count: int     = 10,
+    question_type: str      = "mcq",
+    title: str              = "Quiz",
+) -> list[dict]:
+    """
+    QUIZ-01/02/03: Generate quiz questions from module/week/document content.
+    Returns list of question dicts ready to be stored as QuizQuestion rows.
+    """
+    query    = f"key concepts, definitions, important facts for {question_type} questions"
+    context, chunk_count = _retrieve_context(
+        query=query,
+        module_id=module_id,
+        week_id=week_id,
+        document_id=document_id,
+        student_id=student_id,
+        top_k=min(question_count * 3, 30),
+    )
+
+    if not context:
+        raise ValueError("No content found to generate quiz from. Upload materials first.")
+
+    q_type_label = {
+        "mcq":          "multiple-choice (MCQ)",
+        "short_answer": "short answer",
+        "true_false":   "true/false",
+    }.get(question_type, "multiple-choice")
+
+    prompt = QUIZ_PROMPT.format(
+        count=question_count,
+        q_type=q_type_label,
+        context=context[:12000],  # stay within context window
+    )
+
+    questions_raw = _call_llm_json(prompt)
+
+    if not isinstance(questions_raw, list):
+        raise ValueError("LLM did not return a list of questions")
+
+    # Normalise and validate
+    questions = []
+    for i, q in enumerate(questions_raw[:question_count]):
+        options = q.get("options")
+        # Normalise true/false
+        if question_type == "true_false" and not options:
+            options = [{"id": "a", "text": "True"}, {"id": "b", "text": "False"}]
+
+        questions.append({
+            "position":      i,
+            "question":      str(q.get("question", "")).strip(),
+            "options":       options,
+            "correct_answer": str(q.get("correct_answer", "")).strip(),
+            "explanation":   str(q.get("explanation", "")).strip(),
+            "source_chunk":  str(q.get("source_chunk", ""))[:500],
+        })
+
+    log.info(
+        "quiz_generated",
+        question_count=len(questions),
+        question_type=question_type,
+        chunks_used=chunk_count,
+    )
+    return questions
+
+
+def score_quiz(
+    questions: list,    # QuizQuestion ORM objects
+    answers: dict,      # {question_id_str: student_answer_str}
+) -> tuple[float, list]:
+    """
+    QUIZ-05: Score a submitted quiz.
+    Returns (score_percent, updated_questions_with_is_correct).
+    """
+    correct = 0
+    results = []
+
+    for q in questions:
+        student_ans = answers.get(str(q.id), "").strip().lower()
+        correct_ans = q.correct_answer.strip().lower()
+
+        # For MCQ compare option id; for others compare full text
+        is_correct = (student_ans == correct_ans) or (student_ans in correct_ans)
+
+        q.student_answer = answers.get(str(q.id), "")
+        q.is_correct     = is_correct
+        if is_correct:
+            correct += 1
+        results.append(q)
+
+    score = round((correct / len(questions)) * 100, 1) if questions else 0.0
+    log.info("quiz_scored", correct=correct, total=len(questions), score=score)
+    return score, results
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Flashcard Generator
+# ═══════════════════════════════════════════════════════════════════════════
+
+FLASHCARD_PROMPT = """\
+You are an expert educator creating flashcards to help a student memorise key concepts.
+
+Using ONLY the content provided below, extract exactly {count} key term-definition pairs
+as flashcards. Focus on: definitions, key concepts, important facts, formulas, names.
+
+Rules:
+- Base every card strictly on the provided content.
+- Front (term): concise — typically 2-8 words.
+- Back (definition): clear and complete — 1-3 sentences.
+- source_chunk: a brief phrase from the content proving this fact is there.
+
+Return ONLY a valid JSON array (no markdown, no preamble):
+[
+  {{
+    "front": "term or concept",
+    "back": "clear definition or explanation",
+    "source_chunk": "brief quote from content"
+  }},
+  ...
+]
+
+Content:
+{context}
+"""
+
+
+def generate_flashcards(
+    module_id: str | None   = None,
+    week_id: str | None     = None,
+    document_id: str | None = None,
+    student_id: str         = "",
+    max_cards: int          = 20,
+) -> list[dict]:
+    """
+    FLASH-01/02: Generate flashcard deck from module/week/document content.
+    Returns list of card dicts ready to be stored as Flashcard rows.
+    """
+    query    = "key terms, definitions, important concepts and facts"
+    context, chunk_count = _retrieve_context(
+        query=query,
+        module_id=module_id,
+        week_id=week_id,
+        document_id=document_id,
+        student_id=student_id,
+        top_k=min(max_cards * 2, 40),
+    )
+
+    if not context:
+        raise ValueError("No content found to generate flashcards from. Upload materials first.")
+
+    prompt = FLASHCARD_PROMPT.format(
+        count=max_cards,
+        context=context[:12000],
+    )
+
+    cards_raw = _call_llm_json(prompt)
+
+    if not isinstance(cards_raw, list):
+        raise ValueError("LLM did not return a list of cards")
+
+    cards = []
+    for i, c in enumerate(cards_raw[:max_cards]):
+        front = str(c.get("front", "")).strip()
+        back  = str(c.get("back", "")).strip()
+        if not front or not back:
+            continue
+        cards.append({
+            "position":    i,
+            "front":       front,
+            "back":        back,
+            "source_chunk": str(c.get("source_chunk", ""))[:300],
+            "status":      "new",
+        })
+
+    log.info(
+        "flashcards_generated",
+        card_count=len(cards),
+        chunks_used=chunk_count,
+    )
+    return cards
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Lecture Summariser
+# ═══════════════════════════════════════════════════════════════════════════
+
+SUMMARY_PROMPT = """\
+You are an expert study assistant helping a student prepare for their exam.
+
+Summarise the following course content clearly and concisely.
+
+Structure your summary EXACTLY as follows (use Markdown headings):
+
+## Key Concepts
+- Bullet list of the most important concepts covered
+
+## Main Arguments / Explanations
+- Bullet list of the main arguments, processes, or explanations
+
+## Important Definitions
+- Term: definition (one per bullet)
+
+## Exam Tips
+- What to remember, common pitfalls, likely exam topics
+
+Use clear, plain language a student would understand. Be comprehensive but not padded.
+
+Content ({scope}):
+{context}
+"""
+
+
+def generate_summary(
+    module_id: str | None   = None,
+    week_id: str | None     = None,
+    document_id: str | None = None,
+    student_id: str         = "",
+    scope: str              = "document",
+) -> tuple[str, int]:
+    """
+    SUM-01/02: Generate a structured Markdown summary.
+    Returns (markdown_content, source_doc_count).
+    """
+    scope_labels = {
+        "document": "single document",
+        "week":     "weekly lecture materials",
+        "module":   "full module",
+    }
+    query    = "key concepts definitions main arguments important facts"
+    context, chunk_count = _retrieve_context(
+        query=query,
+        module_id=module_id,
+        week_id=week_id,
+        document_id=document_id,
+        student_id=student_id,
+        top_k=40,   # high top_k — we want comprehensive coverage for summaries
+    )
+
+    if not context:
+        raise ValueError("No content found to summarise. Upload materials first.")
+
+    prompt  = SUMMARY_PROMPT.format(
+        scope=scope_labels.get(scope, scope),
+        context=context[:14000],
+    )
+
+    llm     = get_llm()
+    result  = llm.complete(prompt)
+    summary = str(result).strip()
+
+    log.info(
+        "summary_generated",
+        scope=scope,
+        chunks_used=chunk_count,
+        summary_length=len(summary),
+    )
+    return summary, chunk_count

@@ -1,0 +1,42 @@
+# ── AI / LlamaIndex ──────────────────────────────────────────────────────
+llama-index>=0.14.0
+llama-index-llms-openai>=0.7.0
+llama-index-embeddings-openai>=0.6.0
+openai>=1.30.0
+
+# ── API ───────────────────────────────────────────────────────────────────
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+
+# ── Database ──────────────────────────────────────────────────────────────
+sqlalchemy[asyncio]>=2.0.0
+asyncpg>=0.29.0
+psycopg2-binary>=2.9.9
+
+# ── Validation ────────────────────────────────────────────────────────────
+pydantic>=2.6.0
+pydantic-settings>=2.2.0
+email-validator>=2.1.0
+
+# ── Auth ──────────────────────────────────────────────────────────────────
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+bcrypt==4.0.1
+
+# ── Search ────────────────────────────────────────────────────────────────
+typesense>=0.21.0
+
+# ── Document parsing ──────────────────────────────────────────────────────
+pypdf>=4.0.0
+python-docx>=1.1.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────
+structlog>=24.1.0
+tenacity>=8.2.3
+requests>=2.31.0
+python-dotenv>=1.0.1
+
+# ── Testing ───────────────────────────────────────────────────────────────
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

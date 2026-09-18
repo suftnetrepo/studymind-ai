@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  typesense:
+    image: typesense/typesense:0.25.2
+    container_name: studymind_typesense
+    restart: unless-stopped
+    ports:
+      - "8108:8108"
+    volumes:
+      - typesense_data:/data
+    command: >
+      --data-dir /data
+      --api-key ${TYPESENSE_API_KEY:-studymind-typesense-key}
+      --enable-cors
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8108/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  typesense_data:
