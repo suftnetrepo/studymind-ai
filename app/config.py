@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # ── JWT Auth ──────────────────────────────────────────────────────────
     jwt_secret_key: str = Field(default="change-me-in-production-use-32-char-min")
     jwt_algorithm: str = "HS256"
-    jwt_access_token_expire_minutes: int = 15
+    jwt_access_token_expire_minutes: int = 60
     jwt_refresh_token_expire_days: int = 7
 
     # ── App ───────────────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 64
     top_k_retrieval: int = 6
-    similarity_threshold: float = 0.72
+    similarity_threshold: float = 0.25
 
     @field_validator("app_env")
     @classmethod

@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 async def main():
     from app.db.engine import AsyncSessionLocal, create_all_tables
-    from app.db.models import Institution, User, Semester, Module, Department
+    from app.db.models import Institution, User, Semester, Module, Department, InstitutionCode
     from app.auth.security import hash_password
 
     await create_all_tables()
@@ -91,6 +91,27 @@ async def main():
             access_type="class", status="active",
         )
         db.add(module)
+        await db.flush()
+
+        # Institution join code — students use this to join the institution
+        join_code = InstitutionCode(
+            id=uuid.uuid4(), institution_id=inst.id,
+            code="DEMO2025", code_type="institution_join",
+            target_role="student", max_uses=100, use_count=0,
+            created_by=admin.id, is_active=True,
+        )
+        db.add(join_code)
+
+        # Module enrolment code — students use this to enrol in CSC109
+        enrol_code = InstitutionCode(
+            id=uuid.uuid4(), institution_id=inst.id,
+            code="CSC109", code_type="module_enrolment",
+            target_role="student", max_uses=100, use_count=0,
+            created_by=lecturer.id, is_active=True,
+            metadata_={"module_id": str(module.id)},
+        )
+        db.add(enrol_code)
+
         await db.commit()
 
         print("\n✅ Demo data seeded!\n")
@@ -105,6 +126,8 @@ async def main():
         print(f"\nInstitution ID: {inst.id}")
         print(f"Module ID:      {module.id}  (CSC109)")
         print(f"Semester ID:    {semester.id}")
+        print(f"\nInstitution join code: DEMO2025")
+        print(f"Module enrolment code: CSC109")
         print(f"\nOpen Swagger UI: http://localhost:8000/docs")
         print("1. POST /api/auth/login with any credentials above")
         print("2. Copy access_token → click Authorize → paste token")

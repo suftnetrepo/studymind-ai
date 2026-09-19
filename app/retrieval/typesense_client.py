@@ -78,7 +78,9 @@ def ensure_collection(client: typesense.Client) -> None:
     try:
         existing = client.collections[COLLECTION_NAME].retrieve()
         existing_fields = {f["name"] for f in existing.get("fields", [])}
-        required_fields = {f["name"] for f in COLLECTION_SCHEMA["fields"]}
+        # Typesense never reports the implicit "id" field back via retrieve(),
+        # so it must be excluded here or every startup looks "outdated".
+        required_fields = {f["name"] for f in COLLECTION_SCHEMA["fields"] if f["name"] != "id"}
 
         if not required_fields.issubset(existing_fields):
             log.warning("typesense_schema_outdated", collection=COLLECTION_NAME)

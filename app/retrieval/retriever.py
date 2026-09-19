@@ -133,7 +133,7 @@ class ScopedHybridRetriever(BaseRetriever):
         self._client          = get_typesense_client()
         settings              = get_settings()
         self._top_k           = top_k or settings.top_k_retrieval
-        self._score_threshold = score_threshold if score_threshold is not None else 0.3
+        self._score_threshold = score_threshold if score_threshold is not None else settings.similarity_threshold
         self._scope           = scope or SearchScope()
         super().__init__()
 
