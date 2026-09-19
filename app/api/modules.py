@@ -199,13 +199,9 @@ async def get_module(
     current_user: User = Depends(require_auth),
 ):
     module = await _get_accessible_module(module_id, current_user, db)
-    result = await db.execute(
-        select(Week).where(Week.module_id == module_id).order_by(Week.week_number)
-    )
-    weeks  = result.scalars().all()
 
     schema          = ModuleDetailSchema.model_validate(module)
-    schema.weeks    = [WeekSchema.model_validate(w) for w in weeks]
+    schema.weeks    = [WeekSchema.model_validate(w) for w in module.weeks]
     schema.document_count = (await db.execute(
         select(func.count()).select_from(ModuleDocument)
         .where(ModuleDocument.module_id == module_id, ModuleDocument.is_latest == True)
@@ -664,6 +660,8 @@ async def list_module_documents(
         select(ModuleDocument, Document)
         .join(Document, Document.id == ModuleDocument.document_id)
         .where(ModuleDocument.module_id == module_id)
+        .where(Document.chunk_count > 0)
+        .where(Document.status == "indexed")
     )
 
     if latest_only:
@@ -773,7 +771,11 @@ async def get_document_versions(
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _get_module_or_404(module_id: uuid.UUID, db: AsyncSession) -> Module:
-    result = await db.execute(select(Module).where(Module.id == module_id))
+    result = await db.execute(
+        select(Module)
+        .options(selectinload(Module.weeks))
+        .where(Module.id == module_id)
+    )
     module = result.scalar_one_or_none()
     if not module:
         raise HTTPException(status_code=404, detail="Module not found")

@@ -559,6 +559,8 @@ class QuizGenerateRequest(BaseModel):
     question_type:  str  = Field(default="mcq",
                                  description="mcq | short_answer | true_false")
     title:          Optional[str] = Field(default=None, max_length=255)
+    topic:          Optional[str] = Field(default=None, max_length=200,
+                                          description="Topic to focus on, e.g. 'Python data types'")
 
     @field_validator("question_type")
     @classmethod
@@ -629,6 +631,8 @@ class FlashcardGenerateRequest(BaseModel):
     document_id: Optional[uuid.UUID] = None
     title:       Optional[str] = Field(default=None, max_length=255)
     max_cards:   int = Field(default=20, ge=5, le=50)
+    topic:       Optional[str] = Field(default=None, max_length=200,
+                                       description="Topic to focus on, e.g. 'Python data types'")
 
 
 class FlashcardSchema(BaseModel):
@@ -678,6 +682,8 @@ class SummariseRequest(BaseModel):
         default="document",
         description="document | week | module"
     )
+    topic:       Optional[str] = Field(default=None, max_length=200,
+                                       description="Topic to focus on, e.g. 'Python data types'")
 
     @field_validator("scope")
     @classmethod

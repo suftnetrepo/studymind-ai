@@ -69,6 +69,7 @@ async def generate_quiz_endpoint(
             question_count=req.question_count,
             question_type=req.question_type,
             title=title or "Quiz",
+            topic=req.topic,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -221,6 +222,7 @@ async def generate_flashcards_endpoint(
             document_id=str(req.document_id) if req.document_id else None,
             student_id=str(current_user.id),
             max_cards=req.max_cards,
+            topic=req.topic,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -396,6 +398,7 @@ async def summarise_endpoint(
             document_id=str(req.document_id) if req.document_id else None,
             student_id=str(current_user.id),
             scope=req.scope,
+            topic=req.topic,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))

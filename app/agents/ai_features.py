@@ -130,12 +130,13 @@ def generate_quiz(
     question_count: int     = 10,
     question_type: str      = "mcq",
     title: str              = "Quiz",
+    topic: str | None       = None,
 ) -> list[dict]:
     """
     QUIZ-01/02/03: Generate quiz questions from module/week/document content.
     Returns list of question dicts ready to be stored as QuizQuestion rows.
     """
-    query    = f"key concepts, definitions, important facts for {question_type} questions"
+    query = topic if topic else f"key concepts, definitions, important facts for {question_type} questions"
     context, chunk_count = _retrieve_context(
         query=query,
         module_id=module_id,
@@ -257,12 +258,13 @@ def generate_flashcards(
     document_id: str | None = None,
     student_id: str         = "",
     max_cards: int          = 20,
+    topic: str | None       = None,
 ) -> list[dict]:
     """
     FLASH-01/02: Generate flashcard deck from module/week/document content.
     Returns list of card dicts ready to be stored as Flashcard rows.
     """
-    query    = "key terms, definitions, important concepts and facts"
+    query = topic if topic else "key terms, definitions, important concepts and facts"
     context, chunk_count = _retrieve_context(
         query=query,
         module_id=module_id,
@@ -343,6 +345,7 @@ def generate_summary(
     document_id: str | None = None,
     student_id: str         = "",
     scope: str              = "document",
+    topic: str | None       = None,
 ) -> tuple[str, int]:
     """
     SUM-01/02: Generate a structured Markdown summary.
@@ -353,7 +356,7 @@ def generate_summary(
         "week":     "weekly lecture materials",
         "module":   "full module",
     }
-    query    = "key concepts definitions main arguments important facts"
+    query = topic if topic else "key concepts definitions main arguments important facts"
     context, chunk_count = _retrieve_context(
         query=query,
         module_id=module_id,
