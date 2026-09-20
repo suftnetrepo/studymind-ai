@@ -14,23 +14,27 @@ DOC-11: GET /api/modules/{id}/documents/{doc_id}/versions
 from __future__ import annotations
 
 import asyncio
+import secrets
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from openai import AsyncOpenAI
+from pydantic import BaseModel, Field
 from sqlalchemy import create_engine, select, func
 from sqlalchemy.orm import Session
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.activity.tracker import log_activity
 from app.auth.dependencies import require_auth, require_lecturer, require_student
 from app.config import get_settings
 from app.db.engine import get_db
 from app.db.models import (
     Document, DocumentChunk, Enrolment, InstitutionCode,
-    Module, ModuleDocument, Semester, User, Week,
+    Module, ModuleDocument, Semester, StudyActivity, User, Week,
 )
 from app.db.schemas import (
     DocumentUploadResponse, DocumentVersionSchema,
@@ -116,6 +120,12 @@ async def create_module(
     MOD-01: Lecturer creates a class module.
     MOD-06: Self-learner creates a personal course (access_type=personal).
     """
+    if current_user.role not in {"lecturer", "admin", "self_learner"}:
+        raise HTTPException(
+            status_code=403,
+            detail="Students cannot create modules. Use an enrolment code to join a module.",
+        )
+
     # Self-learners can only create personal courses
     if current_user.role == "self_learner" and body.access_type != "personal":
         raise HTTPException(
@@ -134,6 +144,7 @@ async def create_module(
         semester_id=body.semester_id,
         access_type=body.access_type,
         status=body.status,
+        module_metadata={"emoji": body.emoji} if body.emoji else None,
     )
     db.add(module)
     await db.commit()
@@ -142,6 +153,7 @@ async def create_module(
     schema                = ModuleSchema.model_validate(module)
     schema.document_count = 0
     schema.student_count  = 0
+    schema.emoji          = (module.module_metadata or {}).get("emoji")
     log.info("module_created", module_id=str(module.id), course_code=module.course_code)
     return schema
 
@@ -166,14 +178,27 @@ async def list_modules(
             .where(Enrolment.student_id == current_user.id,
                    Enrolment.status == "active")
         )
-    else:  # self_learner
-        query = select(Module).where(Module.owner_id == current_user.id)
+    else:  # self_learner: own courses plus any module they enrolled in
+        enrolled = select(Enrolment.module_id).where(
+            Enrolment.student_id == current_user.id, Enrolment.status == "active"
+        )
+        query = select(Module).where(
+            (Module.owner_id == current_user.id) | (Module.id.in_(enrolled))
+        )
 
     if status:
         query = query.where(Module.status == status)
 
     result  = await db.execute(query.order_by(Module.updated_at.desc()))
     modules = result.scalars().all()
+
+    # Progress: this user's logged study activity in the module, 10 entries = 100%.
+    activity_rows = await db.execute(
+        select(StudyActivity.module_id, func.count())
+        .where(StudyActivity.user_id == current_user.id, StudyActivity.module_id.is_not(None))
+        .group_by(StudyActivity.module_id)
+    )
+    activity_counts = {r[0]: r[1] for r in activity_rows.all()}
 
     out = []
     for m in modules:
@@ -188,6 +213,8 @@ async def list_modules(
         s                = ModuleSchema.model_validate(m)
         s.document_count = doc_count
         s.student_count  = student_count
+        s.emoji          = (m.module_metadata or {}).get("emoji")
+        s.progress       = min(100, round(activity_counts.get(m.id, 0) / 10 * 100))
         out.append(s)
     return out
 
@@ -481,6 +508,24 @@ async def upload_module_document(
     if not content:
         raise HTTPException(status_code=422, detail="Uploaded file is empty")
 
+    return await _ingest_module_document(
+        module_id, filename=file.filename, ext=ext, content=content,
+        visibility=visibility, week_id=week_id, current_user=current_user, db=db,
+    )
+
+
+async def _ingest_module_document(
+    module_id: uuid.UUID,
+    *,
+    filename: str,
+    ext: str,
+    content: bytes,
+    visibility: str,
+    week_id: uuid.UUID | None,
+    current_user: User,
+    db: AsyncSession,
+) -> DocumentUploadResponse:
+    """Shared by file upload, paste-text and AI-generated study material."""
     module = await _get_accessible_module(module_id, current_user, db)
 
     # Access control: only lecturer/owner can upload class materials
@@ -519,7 +564,7 @@ async def upload_module_document(
         .join(Document, Document.id == ModuleDocument.document_id)
         .where(
             ModuleDocument.module_id == module_id,
-            Document.filename == file.filename,
+            Document.filename == filename,
             ModuleDocument.is_latest == True,
         )
     )
@@ -534,13 +579,13 @@ async def upload_module_document(
         old_doc_id = str(existing_md.document_id)
         ts_client  = get_typesense_client()
         mark_chunks_superseded(ts_client, old_doc_id, existing_md.version)
-        log.info("document_new_version", filename=file.filename, new_version=new_version)
+        log.info("document_new_version", filename=filename, new_version=new_version)
 
     # Create Document record
     doc = Document(
         id=uuid.uuid4(),
         owner_id=current_user.id,
-        filename=file.filename,
+        filename=filename,
         file_type=ext.lstrip("."),
         file_size_bytes=len(content),
         visibility=visibility,
@@ -574,7 +619,7 @@ async def upload_module_document(
 
     def _run():
         try:
-            r = ingestor.ingest(file.filename, content, doc_id, **ingest_params)
+            r = ingestor.ingest(filename, content, doc_id, **ingest_params)
             print(f"INGEST RESULT: {r['status']} chunks={r['chunk_count']} error={r['error']}")
             return r
         except Exception as e:
@@ -623,11 +668,12 @@ async def upload_module_document(
     )
     db.add(md)
     await db.commit()
+    await log_activity(current_user.id, "document_upload", module_id)
 
     log.info(
         "module_document_uploaded",
         module_id=str(module_id),
-        filename=file.filename,
+        filename=filename,
         version=new_version,
         status=result["status"],
         chunks=result["chunk_count"],
@@ -635,14 +681,144 @@ async def upload_module_document(
 
     return DocumentUploadResponse(
         document_id=doc.id,
-        filename=file.filename,
+        filename=filename,
         status=result["status"],
         message=(
-            f"Indexed {result['chunk_count']} chunks from '{file.filename}' (v{new_version})"
+            f"Indexed {result['chunk_count']} chunks from '{filename}' (v{new_version})"
             if result["status"] == "indexed"
             else f"Ingestion failed: {result['error']}"
         ),
     )
+
+
+class PasteTextRequest(BaseModel):
+    title:      str = Field(..., min_length=1, max_length=200)
+    content:    str = Field(..., min_length=10, max_length=50000)
+    visibility: str = Field(default="class", pattern="^(class|personal)$")
+
+
+def _safe_stem(title: str) -> str:
+    stem = "".join(c if c.isalnum() or c in " -_" else "" for c in title).strip().replace(" ", "_")
+    return stem[:80] or "document"
+
+
+@router.post("/modules/{module_id}/documents/paste", response_model=DocumentUploadResponse, status_code=201)
+async def paste_text_document(
+    module_id: uuid.UUID,
+    req: PasteTextRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    """Save pasted text as a .txt document and index it like an upload."""
+    return await _ingest_module_document(
+        module_id, filename=f"{_safe_stem(req.title)}.txt", ext=".txt",
+        content=req.content.encode("utf-8"), visibility=req.visibility,
+        week_id=None, current_user=current_user, db=db,
+    )
+
+
+LEVEL_INSTRUCTIONS = {
+    "beginner":     "Use simple language, define all terms, include many examples.",
+    "intermediate": "Assume basic knowledge. Balance theory with examples.",
+    "advanced":     "Use technical terminology. Include edge cases and deeper theory.",
+}
+
+
+class GenerateMaterialRequest(BaseModel):
+    topic:      str = Field(..., min_length=3, max_length=500)
+    level:      str = Field(default="intermediate", pattern="^(beginner|intermediate|advanced)$")
+    visibility: str = Field(default="class", pattern="^(class|personal)$")
+
+
+@router.post("/modules/{module_id}/documents/generate", response_model=DocumentUploadResponse, status_code=201)
+async def generate_study_material(
+    module_id: uuid.UUID,
+    req: GenerateMaterialRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    """Generate a study guide with the LLM, then index it like an upload."""
+    await _get_accessible_module(module_id, current_user, db)   # fail fast before paying for a generation
+
+    prompt = f"""Create a comprehensive study guide on: {req.topic}
+
+Level: {req.level}. {LEVEL_INSTRUCTIONS[req.level]}
+
+Use these sections:
+# {req.topic}: Study Guide
+## Overview
+## Key Concepts
+## Detailed Explanation
+## Examples
+## Key Terms & Definitions
+## Summary
+## Practice Questions (5)
+
+Write at least 800 words. Be thorough, accurate and educational. Write mathematics and science
+symbols directly in Unicode (x², H₂O, √, π, →) and never use LaTeX."""
+
+    settings = get_settings()
+    try:
+        resp = await AsyncOpenAI(api_key=settings.openai_api_key).chat.completions.create(
+            model=settings.openai_chat_model,
+            max_tokens=4096,
+            temperature=0.7,
+            messages=[
+                {"role": "system", "content": "You are an expert educator creating high-quality study materials."},
+                {"role": "user",   "content": prompt},
+            ],
+        )
+    except Exception as exc:
+        log.error("generate_material_failed", error=str(exc))
+        raise HTTPException(status_code=502, detail="The AI service is unavailable. Try again.")
+
+    content = (resp.choices[0].message.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=502, detail="The AI returned no content. Try again.")
+
+    return await _ingest_module_document(
+        module_id, filename=f"{_safe_stem(req.topic)}_study_guide.txt", ext=".txt",
+        content=content.encode("utf-8"), visibility=req.visibility,
+        week_id=None, current_user=current_user, db=db,
+    )
+
+
+@router.post("/modules/{module_id}/enrolment-code")
+async def create_enrolment_code(
+    module_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_lecturer),
+):
+    """Lecturer mints (or re-reads) the code students use to enrol in this module."""
+    module = await _get_owned_module(module_id, current_user, db)
+    existing = await db.execute(
+        select(InstitutionCode).where(
+            InstitutionCode.code_type == "module_enrolment",
+            InstitutionCode.is_active == True,
+            InstitutionCode.created_by == current_user.id,
+            InstitutionCode.metadata_["module_id"].astext == str(module_id),
+        ).limit(1)
+    )
+    code = existing.scalar_one_or_none()
+    if code:
+        return {"code": code.code, "module_id": str(module_id)}
+
+    if not module.institution_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Join an institution before creating enrolment codes.",
+        )
+    if module.access_type == "personal":
+        module.access_type = "class"          # personal modules can't be enrolled in
+
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    code_str = (module.course_code or "MOD")[:6].upper() + "-" + "".join(secrets.choice(alphabet) for _ in range(4))
+    db.add(InstitutionCode(
+        institution_id=module.institution_id, code=code_str, code_type="module_enrolment",
+        target_role="student", created_by=current_user.id, metadata_={"module_id": str(module_id)},
+    ))
+    await db.commit()
+    return {"code": code_str, "module_id": str(module_id)}
 
 
 @router.get("/modules/{module_id}/documents", response_model=list[ModuleDocumentSchema])

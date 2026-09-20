@@ -377,6 +377,7 @@ class ModuleCreate(BaseModel):
     description: Optional[str] = Field(default=None, max_length=1000)
     semester_id: Optional[uuid.UUID] = None
     department_id: Optional[uuid.UUID] = None
+    emoji: Optional[str] = Field(default=None, max_length=10)
     access_type: str = Field(default="personal",
                              description="personal | class | institution")
     status: str = Field(default="active",
@@ -416,6 +417,8 @@ class ModuleSchema(BaseModel):
     updated_at: datetime
     document_count: int = 0
     student_count: int = 0
+    progress: int = Field(default=0, ge=0, le=100)
+    emoji: Optional[str] = None
 
 
 class ModuleDetailSchema(ModuleSchema):
@@ -497,6 +500,9 @@ class ScopedChatRequest(BaseModel):
 
     # SRCH-07: Include previous semesters
     include_archived: bool = False
+
+    # Explanation depth: simple ("explain like I'm 5") | normal | expert
+    complexity: str = Field(default="normal", pattern="^(simple|normal|expert)$")
 
     # SRCH-03/04: /csc109/week3 shortcut embedded in message is auto-detected
     # No extra field needed — parser reads message prefix

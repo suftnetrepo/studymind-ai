@@ -14,6 +14,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.activity.tracker import log_activity
 from app.agents.ai_features import (
     generate_flashcards, generate_quiz, generate_summary, score_quiz,
 )
@@ -103,6 +104,7 @@ async def generate_quiz_endpoint(
 
     await db.commit()
     await db.refresh(attempt)
+    await log_activity(current_user.id, "quiz", req.module_id)
 
     # Load with questions
     result = await db.execute(
@@ -255,6 +257,7 @@ async def generate_flashcards_endpoint(
 
     await db.commit()
     await db.refresh(deck)
+    await log_activity(current_user.id, "flashcard", req.module_id)
 
     result = await db.execute(
         select(FlashcardDeck)
@@ -273,6 +276,7 @@ async def list_flashcard_decks(
     """List all flashcard decks for the current user."""
     query = (
         select(FlashcardDeck)
+        .options(selectinload(FlashcardDeck.cards))
         .where(FlashcardDeck.user_id == current_user.id)
         .order_by(FlashcardDeck.created_at.desc())
     )
@@ -416,6 +420,7 @@ async def summarise_endpoint(
     db.add(summary)
     await db.commit()
     await db.refresh(summary)
+    await log_activity(current_user.id, "summary", req.module_id)
 
     log.info(
         "summary_saved",

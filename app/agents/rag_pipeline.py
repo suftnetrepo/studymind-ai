@@ -42,6 +42,35 @@ Guidelines:
 - Keep answers focused and educational — you are helping a student learn.
 """
 
+
+COMPLEXITY_MODIFIERS = {
+    "simple": """
+COMPLEXITY LEVEL: SIMPLE
+- Use very simple language, short sentences, everyday analogies
+- Avoid technical jargon — if you must use a technical term, immediately explain it simply
+- Use the "Explain Like I'm 5" approach: relate concepts to everyday things
+- Keep answers concise and friendly
+""",
+    "normal": """
+COMPLEXITY LEVEL: NORMAL
+- Use clear, accessible language suitable for a university student
+- Balance technical accuracy with readability
+- Use examples where helpful
+""",
+    "expert": """
+COMPLEXITY LEVEL: EXPERT
+- Use precise technical terminology without simplification
+- Include implementation details, edge cases, and nuances
+- Assume strong prior knowledge of the subject
+- Reference related concepts and deeper theory where relevant
+""",
+}
+
+
+def build_system_prompt(complexity: str = "normal") -> str:
+    modifier = COMPLEXITY_MODIFIERS.get(complexity, COMPLEXITY_MODIFIERS["normal"])
+    return f"{SYSTEM_PROMPT}\n{modifier}"
+
 QA_PROMPT_TMPL = """\
 {system_prompt}
 
@@ -241,6 +270,7 @@ class RAGPipeline:
         semester_id: str | None     = None,
         semester_label: str | None  = None,
         week_number: int | None     = None,
+        complexity: str             = "normal",
     ) -> dict:
         """
         Synchronous scoped RAG query.
@@ -295,7 +325,7 @@ class RAGPipeline:
         )
 
         prompt = QA_PROMPT.format(
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=build_system_prompt(complexity),
             history=_format_history(history),
             scope_description=scope_desc,
             context_str=context_str,
@@ -357,6 +387,7 @@ class RAGPipeline:
         semester_id: str | None     = None,
         semester_label: str | None  = None,
         week_number: int | None     = None,
+        complexity: str             = "normal",
     ) -> tuple[Any, list[SourceCitation], ScopeIndicator]:
         """
         Returns (stream, citations, scope_indicator).
@@ -399,7 +430,7 @@ class RAGPipeline:
         )
 
         prompt = QA_PROMPT.format(
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=build_system_prompt(complexity),
             history=_format_history(history),
             scope_description=scope_desc,
             context_str=context_str,

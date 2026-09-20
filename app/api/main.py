@@ -19,6 +19,9 @@ from app.api.health import router as health_router
 from app.api.features import router as features_router
 from app.api.institutions import router as inst_router
 from app.api.modules import router as modules_router
+from app.api.writing import router as writing_router
+from app.api.onboarding import router as onboarding_router
+from app.api.activity import router as activity_router
 from app.db.engine import create_all_tables
 from app.logging_config import configure_logging, get_logger
 from app.retrieval.typesense_client import ensure_collection, get_typesense_client
@@ -81,6 +84,9 @@ def create_app() -> FastAPI:
     app.include_router(modules_router)
     app.include_router(features_router)
     app.include_router(chat_router)
+    app.include_router(writing_router)
+    app.include_router(onboarding_router)
+    app.include_router(activity_router)
     app.include_router(docs_router)
     app.include_router(health_router)
 

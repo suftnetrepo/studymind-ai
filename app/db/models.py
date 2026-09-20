@@ -5,11 +5,11 @@ Sprint 2: Department, PasswordResetToken, InstitutionCode.
 """
 from __future__ import annotations
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import (
-    Boolean, DateTime, Float, ForeignKey, Integer,
+    Boolean, Date, DateTime, Float, ForeignKey, Integer,
     String, Text, func, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -588,4 +588,30 @@ class Summary(Base):
     source_doc_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+# ── Study activity (streaks) ───────────────────────────────────────────────
+
+class StudyActivity(Base):
+    __tablename__ = "study_activities"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # 'chat' | 'quiz' | 'flashcard' | 'summary' | 'notes' | 'document_upload'
+    activity_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    module_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("modules.id", ondelete="SET NULL"), nullable=True
+    )
+    activity_date: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    # NULL module_ids are distinct to Postgres, so the tracker also checks for an
+    # existing row before inserting.
+    __table_args__ = (
+        UniqueConstraint("user_id", "activity_type", "module_id", "activity_date", name="uq_study_activity"),
     )
