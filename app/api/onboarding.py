@@ -24,7 +24,7 @@ async def get_onboarding_status(
     if current_user.role == "student":
         enrolled = await db.scalar(
             select(func.count()).select_from(Enrolment)
-            .where(Enrolment.student_id == current_user.id, Enrolment.status == "active")
+            .where(Enrolment.student_id == current_user.id, Enrolment.status.in_(("active", "archived")))
         ) or 0
         return {
             "complete": current_user.institution_id is not None or enrolled > 0,

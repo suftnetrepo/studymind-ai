@@ -27,7 +27,7 @@ from app.db.models import (
 from app.db.schemas import (
     FlashcardDeckSchema, FlashcardGenerateRequest,
     FlashcardSchema, FlashcardUpdateRequest,
-    QuizAttemptSchema, QuizGenerateRequest,
+    QuizAttemptSchema, QuizGenerateRequest, QuizListItem, QuizProgressRequest,
     QuizSubmitRequest, QuizSubmitResponse,
     SummariseRequest, SummarySchema,
 )
@@ -178,7 +178,39 @@ async def submit_quiz(
     )
 
 
-@router.get("/quiz/history/list", response_model=list[QuizAttemptSchema])
+@router.patch("/quiz/{attempt_id}/progress", status_code=204)
+async def save_quiz_progress(
+    attempt_id: uuid.UUID,
+    req: QuizProgressRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    """Save in-progress answers (ungraded) so the quiz can be resumed later."""
+    attempt = await _get_quiz_or_404(attempt_id, current_user.id, db)
+    if attempt.status == "submitted":
+        raise HTTPException(status_code=409, detail="This quiz has already been submitted")
+    questions = (await db.execute(
+        select(QuizQuestion).where(QuizQuestion.attempt_id == attempt_id)
+    )).scalars().all()
+    by_id = {str(a.question_id): a.answer for a in req.answers}
+    for q in questions:
+        if str(q.id) in by_id:
+            q.student_answer = by_id[str(q.id)]
+    await db.commit()
+
+
+@router.delete("/quiz/{attempt_id}", status_code=204)
+async def delete_quiz(
+    attempt_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    attempt = await _get_quiz_or_404(attempt_id, current_user.id, db)
+    await db.delete(attempt)   # questions cascade
+    await db.commit()
+
+
+@router.get("/quiz/history/list", response_model=list[QuizListItem])
 async def quiz_history(
     module_id: uuid.UUID | None = None,
     db: AsyncSession = Depends(get_db),
@@ -193,8 +225,22 @@ async def quiz_history(
     )
     if module_id:
         query = query.where(QuizAttempt.module_id == module_id)
-    result = await db.execute(query)
-    return result.scalars().all()
+    attempts = (await db.execute(query)).scalars().all()
+    if not attempts:
+        return []
+    counts = dict((await db.execute(
+        select(QuizQuestion.attempt_id, func.count())
+        .where(QuizQuestion.attempt_id.in_([a.id for a in attempts]), QuizQuestion.student_answer.is_not(None))
+        .group_by(QuizQuestion.attempt_id)
+    )).all())
+    return [
+        QuizListItem(
+            id=a.id, module_id=a.module_id, title=a.title, question_type=a.question_type,
+            question_count=a.question_count, answered_count=counts.get(a.id, 0),
+            score=a.score, status=a.status, created_at=a.created_at, submitted_at=a.submitted_at,
+        )
+        for a in attempts
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -448,6 +494,22 @@ async def list_summaries(
         query = query.where(Summary.module_id == module_id)
     result = await db.execute(query)
     return result.scalars().all()
+
+
+@router.delete("/summarise/{summary_id}", status_code=204)
+async def delete_summary(
+    summary_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    result = await db.execute(
+        select(Summary).where(Summary.id == summary_id, Summary.user_id == current_user.id)
+    )
+    summary = result.scalar_one_or_none()
+    if not summary:
+        raise HTTPException(status_code=404, detail="Summary not found")
+    await db.delete(summary)
+    await db.commit()
 
 
 @router.get("/summarise/{summary_id}", response_model=SummarySchema)

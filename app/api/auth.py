@@ -45,7 +45,11 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 @router.post("/register", response_model=UserSchema, status_code=201)
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
-    """Register a new user account. Role must be one of: admin | lecturer | student | self_learner."""
+    """Register a new user account. Role must be one of: lecturer | student | self_learner."""
+
+    # Admin accounts are provisioned by staff (seed script / database), never self-served.
+    if body.role == "admin":
+        raise HTTPException(status_code=403, detail="Admin accounts cannot be created through registration")
 
     # Check email uniqueness
     existing = await db.execute(select(User).where(User.email == body.email))
@@ -221,3 +225,47 @@ async def update_me(
     await db.commit()
     await db.refresh(current_user)
     return current_user
+
+
+# ── DELETE /me (App Store guideline 5.1.1(v): in-app account deletion) ──────
+
+@router.delete("/me", status_code=204)
+async def delete_me(
+    current_user: User = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Permanently delete the signed-in account and everything it owns: modules, documents, indexed
+    chunks, chats, quizzes, flashcards, summaries and activity. Admins are removed by staff only.
+    """
+    if current_user.role == "admin":
+        raise HTTPException(status_code=403, detail="Administrator accounts must be removed by staff")
+
+    from sqlalchemy import delete as sa_delete, union
+    from app.db.models import Document, Module, ModuleDocument
+    from app.retrieval.typesense_client import delete_document_chunks, get_typesense_client
+
+    owned_modules = select(Module.id).where(Module.owner_id == current_user.id)
+    rows = await db.execute(union(
+        select(Document.id).where(Document.owner_id == current_user.id),
+        select(ModuleDocument.document_id).where(ModuleDocument.module_id.in_(owned_modules)),
+    ))
+    doc_ids = [str(r[0]) for r in rows.all()]
+
+    # Remove the search index entries first; a failure here must not leave the account half-deleted.
+    def _purge():
+        client = get_typesense_client()
+        for doc_id in doc_ids:
+            try:
+                delete_document_chunks(client, doc_id)
+            except Exception as exc:
+                log.warning("account_delete_chunk_purge_failed", document_id=doc_id, error=str(exc))
+
+    import asyncio
+    await asyncio.get_running_loop().run_in_executor(None, _purge)
+
+    if doc_ids:
+        await db.execute(sa_delete(Document).where(Document.id.in_([uuid.UUID(d) for d in doc_ids])))
+    await db.delete(current_user)
+    await db.commit()
+    log.info("account_deleted", user_id=str(current_user.id), documents=len(doc_ids))

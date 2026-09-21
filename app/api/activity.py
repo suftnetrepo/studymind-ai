@@ -126,3 +126,15 @@ async def get_activity_summary(
     }
     out["total"] = sum(out.values())
     return out
+
+
+@router.get("/quota/status")
+async def get_quota_status(current_user: User = Depends(require_auth)):
+    # Quotas are enforced on the device via RevenueCat; the backend only reports the account context.
+    is_institution_user = current_user.role in ("student", "lecturer", "admin")
+    return {
+        "is_pro":              is_institution_user,
+        "is_institution_user": is_institution_user,
+        "role":                current_user.role,
+        "quotas":              {},
+    }

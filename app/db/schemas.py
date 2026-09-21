@@ -612,9 +612,27 @@ class QuizAttemptSchema(BaseModel):
     questions:      list[QuizQuestionSchema] = []
 
 
+class QuizListItem(BaseModel):
+    """Lightweight row for the quiz list (no questions)."""
+    id:             uuid.UUID
+    module_id:      Optional[uuid.UUID] = None
+    title:          str
+    question_type:  str
+    question_count: int
+    answered_count: int = 0
+    score:          Optional[float] = None
+    status:         str
+    created_at:     datetime
+    submitted_at:   Optional[datetime] = None
+
+
 class QuizSubmitAnswer(BaseModel):
     question_id: uuid.UUID
     answer:      str = Field(..., min_length=1)
+
+
+class QuizProgressRequest(BaseModel):
+    answers: list[QuizSubmitAnswer] = Field(..., max_length=100)
 
 
 class QuizSubmitRequest(BaseModel):

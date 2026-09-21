@@ -176,11 +176,11 @@ async def list_modules(
             select(Module)
             .join(Enrolment, Enrolment.module_id == Module.id)
             .where(Enrolment.student_id == current_user.id,
-                   Enrolment.status == "active")
+                   Enrolment.status.in_(("active", "archived")))
         )
     else:  # self_learner: own courses plus any module they enrolled in
         enrolled = select(Enrolment.module_id).where(
-            Enrolment.student_id == current_user.id, Enrolment.status == "active"
+            Enrolment.student_id == current_user.id, Enrolment.status.in_(("active", "archived"))
         )
         query = select(Module).where(
             (Module.owner_id == current_user.id) | (Module.id.in_(enrolled))
@@ -200,6 +200,12 @@ async def list_modules(
     )
     activity_counts = {r[0]: r[1] for r in activity_rows.all()}
 
+    # A student's own archive flag lives on their enrolment, not on the shared module.
+    mine = await db.execute(
+        select(Enrolment.module_id, Enrolment.status).where(Enrolment.student_id == current_user.id)
+    )
+    my_enrolment = {r[0]: r[1] for r in mine.all()}
+
     out = []
     for m in modules:
         doc_count = (await db.execute(
@@ -208,15 +214,53 @@ async def list_modules(
         )).scalar() or 0
         student_count = (await db.execute(
             select(func.count()).select_from(Enrolment)
-            .where(Enrolment.module_id == m.id, Enrolment.status == "active")
+            .where(Enrolment.module_id == m.id, Enrolment.status.in_(("active", "archived")))
         )).scalar() or 0
         s                = ModuleSchema.model_validate(m)
         s.document_count = doc_count
         s.student_count  = student_count
         s.emoji          = (m.module_metadata or {}).get("emoji")
+        if m.owner_id != current_user.id and my_enrolment.get(m.id) == "archived":
+            s.status = "archived"
         s.progress       = min(100, round(activity_counts.get(m.id, 0) / 10 * 100))
         out.append(s)
     return out
+
+
+async def _set_archived(module_id: uuid.UUID, archived: bool, user: User, db: AsyncSession) -> dict:
+    """Owners archive the module itself; enrolled members archive only their own view of it."""
+    module = await _get_module_or_404(module_id, db)
+    new_status = "archived" if archived else "active"
+
+    if module.owner_id == user.id:
+        module.status = new_status
+    else:
+        enrol = (await db.execute(
+            select(Enrolment).where(Enrolment.student_id == user.id, Enrolment.module_id == module_id)
+        )).scalar_one_or_none()
+        if not enrol:
+            raise HTTPException(status_code=404, detail="Module not found")
+        enrol.status = new_status
+    await db.commit()
+    return {"module_id": str(module_id), "status": new_status}
+
+
+@router.post("/modules/{module_id}/archive")
+async def archive_module(
+    module_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    return await _set_archived(module_id, True, current_user, db)
+
+
+@router.post("/modules/{module_id}/restore")
+async def restore_module(
+    module_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    return await _set_archived(module_id, False, current_user, db)
 
 
 @router.get("/modules/{module_id}", response_model=ModuleDetailSchema)
@@ -235,7 +279,7 @@ async def get_module(
     )).scalar() or 0
     schema.student_count = (await db.execute(
         select(func.count()).select_from(Enrolment)
-        .where(Enrolment.module_id == module_id, Enrolment.status == "active")
+        .where(Enrolment.module_id == module_id, Enrolment.status.in_(("active", "archived")))
     )).scalar() or 0
     return schema
 
@@ -288,9 +332,34 @@ async def delete_module(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_auth),
 ):
+    """Delete a module and everything in it: documents, search index entries and its chats."""
     module = await _get_owned_module(module_id, current_user, db)
+
+    doc_ids = [
+        str(r[0]) for r in (await db.execute(
+            select(ModuleDocument.document_id).where(ModuleDocument.module_id == module_id)
+        )).all()
+    ]
+
+    def _purge():
+        client = get_typesense_client()
+        for doc_id in doc_ids:
+            try:
+                delete_document_chunks(client, doc_id)
+            except Exception as exc:
+                log.warning("module_delete_chunk_purge_failed", document_id=doc_id, error=str(exc))
+
+    await asyncio.get_running_loop().run_in_executor(executor, _purge)
+
+    from sqlalchemy import delete as sa_delete
+    from app.db.models import ChatSession
+    # Chats would otherwise survive as module-less conversations that still quote the course.
+    await db.execute(sa_delete(ChatSession).where(ChatSession.module_id == module_id))
+    if doc_ids:
+        await db.execute(sa_delete(Document).where(Document.id.in_([uuid.UUID(d) for d in doc_ids])))
     await db.delete(module)
     await db.commit()
+    log.info("module_deleted", module_id=str(module_id), documents=len(doc_ids))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -462,7 +531,7 @@ async def list_enrolled_students(
     result = await db.execute(
         select(Enrolment, User)
         .join(User, User.id == Enrolment.student_id)
-        .where(Enrolment.module_id == module_id, Enrolment.status == "active")
+        .where(Enrolment.module_id == module_id, Enrolment.status.in_(("active", "archived")))
         .order_by(User.full_name)
     )
     return [
@@ -620,10 +689,10 @@ async def _ingest_module_document(
     def _run():
         try:
             r = ingestor.ingest(filename, content, doc_id, **ingest_params)
-            print(f"INGEST RESULT: {r['status']} chunks={r['chunk_count']} error={r['error']}")
+            log.info("ingest_result", status=r["status"], chunks=r["chunk_count"], error=r["error"])
             return r
         except Exception as e:
-            print(f"INGEST EXCEPTION: {e}")
+            log.error("ingest_exception", error=str(e))
             import traceback; traceback.print_exc()
             raise
 
@@ -890,9 +959,10 @@ async def delete_module_document(
 
     md, doc = row
 
-    # Only lecturer/owner or the personal note owner can delete
-    if current_user.role == "student" and doc.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="You can only delete your own personal notes")
+    # Only the module owner, an admin, or the person who uploaded the document may delete it
+    module = await _get_module_or_404(module_id, db)
+    if module.owner_id != current_user.id and current_user.role != "admin" and doc.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="You can only delete your own documents")
 
     ts_client = get_typesense_client()
     delete_document_chunks(ts_client, str(document_id))
@@ -988,7 +1058,7 @@ async def _get_accessible_module(
             select(Enrolment).where(
                 Enrolment.student_id == user.id,
                 Enrolment.module_id == module_id,
-                Enrolment.status == "active",
+                Enrolment.status.in_(("active", "archived")),
             )
         )
         if enrolment.scalar_one_or_none():

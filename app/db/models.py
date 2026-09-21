@@ -615,3 +615,4 @@ class StudyActivity(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "activity_type", "module_id", "activity_date", name="uq_study_activity"),
     )
+

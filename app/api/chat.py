@@ -384,7 +384,7 @@ async def delete_session(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    session.is_active = False
+    await db.delete(session)   # messages cascade; a deleted chat is really gone
     await db.commit()
 
 

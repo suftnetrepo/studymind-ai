@@ -169,16 +169,13 @@ def generate_quiz(
     # Normalise and validate
     questions = []
     for i, q in enumerate(questions_raw[:question_count]):
-        options = q.get("options")
-        # Normalise true/false
-        if question_type == "true_false" and not options:
-            options = [{"id": "a", "text": "True"}, {"id": "b", "text": "False"}]
+        options, correct = _normalise_options(q.get("options"), str(q.get("correct_answer", "")), question_type)
 
         questions.append({
             "position":      i,
             "question":      str(q.get("question", "")).strip(),
             "options":       options,
-            "correct_answer": str(q.get("correct_answer", "")).strip(),
+            "correct_answer": correct,
             "explanation":   str(q.get("explanation", "")).strip(),
             "source_chunk":  str(q.get("source_chunk", ""))[:500],
         })
@@ -190,6 +187,33 @@ def generate_quiz(
         chunks_used=chunk_count,
     )
     return questions
+
+
+def _normalise_options(raw_options, raw_correct: str, question_type: str):
+    """
+    Always return [{id, text}] options and a correct_answer that is one of those ids, whatever shape
+    the model produced (plain strings, "A"/"True" answers, missing options for true/false...).
+    """
+    ids = "abcdefgh"
+    if question_type == "true_false" or not raw_options:
+        if question_type == "true_false":
+            options = [{"id": "a", "text": "True"}, {"id": "b", "text": "False"}]
+        else:
+            return raw_options, raw_correct.strip().lower()
+    else:
+        options = []
+        for idx, o in enumerate(raw_options):
+            if isinstance(o, dict):
+                options.append({"id": str(o.get("id", ids[idx])).strip().lower(), "text": str(o.get("text", "")).strip()})
+            else:
+                options.append({"id": ids[idx], "text": str(o).strip()})
+
+    c = raw_correct.strip().lower()
+    valid_ids = {o["id"] for o in options}
+    if c not in valid_ids:
+        by_text = next((o["id"] for o in options if o["text"].strip().lower() == c), None)
+        c = by_text or (c[:1] if c[:1] in valid_ids else options[0]["id"])
+    return options, c
 
 
 def score_quiz(
@@ -208,7 +232,7 @@ def score_quiz(
         correct_ans = q.correct_answer.strip().lower()
 
         # For MCQ compare option id; for others compare full text
-        is_correct = (student_ans == correct_ans) or (student_ans in correct_ans)
+        is_correct = bool(student_ans) and student_ans == correct_ans
 
         q.student_answer = answers.get(str(q.id), "")
         q.is_correct     = is_correct

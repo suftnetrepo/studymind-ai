@@ -14,7 +14,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.agents.llm_factory import configure_llama_settings
 from app.api.auth import router as auth_router
 from app.api.chat import router as chat_router
-from app.api.documents import router as docs_router
 from app.api.health import router as health_router
 from app.api.features import router as features_router
 from app.api.institutions import router as inst_router
@@ -87,7 +86,8 @@ def create_app() -> FastAPI:
     app.include_router(writing_router)
     app.include_router(onboarding_router)
     app.include_router(activity_router)
-    app.include_router(docs_router)
+    # NOTE: the legacy unauthenticated /api/documents router is intentionally not mounted; all
+    # document access goes through the authenticated /api/modules/{id}/documents endpoints.
     app.include_router(health_router)
 
     return app
