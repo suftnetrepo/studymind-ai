@@ -83,7 +83,7 @@ async def generate_writing(
             max_tokens=2500,
             temperature=0.7,
             messages=[
-                {"role": "system", "content": "You are StudyMind AI's writing assistant. Produce high quality written content as requested. "
+                {"role": "system", "content": "You are Revvo's writing assistant. Produce high quality written content as requested. "
                  "Format with Markdown (headings, bold, lists, tables where useful). For mathematics and science, "
                  "write symbols directly in Unicode (x², H₂O, √, π, ∑, →, ≤, Δ, ±, ×, °) and NEVER use LaTeX or dollar-sign delimiters."},
                 {"role": "user",   "content": _build_prompt(req)},

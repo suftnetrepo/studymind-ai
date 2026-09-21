@@ -68,6 +68,21 @@ class UserSchema(BaseModel):
     last_login: Optional[datetime] = None
 
 
+class ForgotPasswordRequest(BaseModel):
+    """Launch-stage reset: email + new password, self-learner accounts only (see /auth/forgot-password)."""
+    email: EmailStr
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v: str) -> str:
+        if not any(c.isupper() for c in v):
+            raise ValueError("Password must contain at least one uppercase letter")
+        if not any(c.isdigit() for c in v):
+            raise ValueError("Password must contain at least one digit")
+        return v
+
+
 class UserUpdateRequest(BaseModel):
     full_name: Optional[str] = Field(default=None, min_length=2, max_length=255)
     profile: Optional[dict] = None

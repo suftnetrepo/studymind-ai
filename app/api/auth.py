@@ -8,6 +8,7 @@ AUTH-08: Get current user profile (/me)
 """
 from __future__ import annotations
 
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -28,6 +29,7 @@ from app.config import get_settings
 from app.db.engine import get_db
 from app.db.models import RefreshToken, User
 from app.db.schemas import (
+    ForgotPasswordRequest,
     LoginRequest,
     RefreshRequest,
     RegisterRequest,
@@ -41,6 +43,13 @@ log    = get_logger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
+# ── Public app config (which sign-up roles are open) ────────────────────────
+
+@router.get("/config")
+async def public_config():
+    return {"enabled_roles": get_settings().enabled_role_list}
+
+
 # ── AUTH-01: Register ──────────────────────────────────────────────────────
 
 @router.post("/register", response_model=UserSchema, status_code=201)
@@ -50,6 +59,13 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     # Admin accounts are provisioned by staff (seed script / database), never self-served.
     if body.role == "admin":
         raise HTTPException(status_code=403, detail="Admin accounts cannot be created through registration")
+
+    # Launch gating: only the roles switched on in ENABLED_ROLES can sign up.
+    if body.role not in get_settings().enabled_role_list:
+        raise HTTPException(
+            status_code=403,
+            detail="Sign-up for this account type isn't open yet. Choose Self-learner to get started.",
+        )
 
     # Check email uniqueness
     existing = await db.execute(select(User).where(User.email == body.email))
@@ -74,6 +90,52 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
     log.info("user_registered", user_id=str(user.id), role=user.role)
     return user
+
+
+# ── Simple password reset (email + new password) ──────────────────────────
+# Deliberately email-free for the launch stage. To limit abuse it only works for self-learner
+# accounts (never staff or institution accounts), is rate limited, and signs out every device.
+
+_RESET_ATTEMPTS: dict[str, list[float]] = {}
+
+
+def _throttle(key: str, limit: int, window_s: int = 3600) -> bool:
+    now = time.time()
+    hits = [t for t in _RESET_ATTEMPTS.get(key, []) if now - t < window_s]
+    if len(hits) >= limit:
+        _RESET_ATTEMPTS[key] = hits
+        return False
+    hits.append(now)
+    _RESET_ATTEMPTS[key] = hits
+    return True
+
+
+@router.post("/forgot-password")
+async def forgot_password(
+    body: ForgotPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    ip = request.client.host if request.client else "unknown"
+    email = body.email.lower()
+    if not (_throttle(f"ip:{ip}", 20) and _throttle(f"email:{email}", 5)):
+        raise HTTPException(status_code=429, detail="Too many attempts. Please try again later.")
+
+    user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="No account found with that email.")
+    if user.role != "self_learner":
+        raise HTTPException(
+            status_code=403,
+            detail="This account type can't reset its password in the app. Please contact support.",
+        )
+
+    user.password_hash = hash_password(body.new_password)
+    from sqlalchemy import delete as sa_delete
+    await db.execute(sa_delete(RefreshToken).where(RefreshToken.user_id == user.id))
+    await db.commit()
+    log.info("password_reset_simple", user_id=str(user.id))
+    return {"ok": True}
 
 
 # ── AUTH-02: Login ─────────────────────────────────────────────────────────

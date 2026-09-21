@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     typesense_protocol: str = "http"
     typesense_api_key: str = "studymind-typesense-key"
 
+    # ── Launch gating ─────────────────────────────────────────────────────
+    # Comma-separated roles that may self-register. Existing accounts of any role keep working.
+    enabled_roles: str = "self_learner"
+
+    @property
+    def enabled_role_list(self) -> list[str]:
+        return [r.strip() for r in self.enabled_roles.split(",") if r.strip()]
+
     # ── JWT Auth ──────────────────────────────────────────────────────────
     jwt_secret_key: str = Field(default="change-me-in-production-use-32-char-min")
     jwt_algorithm: str = "HS256"
