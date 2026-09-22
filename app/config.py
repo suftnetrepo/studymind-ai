@@ -56,10 +56,28 @@ class Settings(BaseSettings):
         return self._dsn_with_driver("psycopg2")
 
     # ── Typesense ─────────────────────────────────────────────────────────
+    # If TYPESENSE_URL is set (e.g. a managed instance on Render), it takes
+    # precedence over the discrete typesense_* fields below.
+    typesense_url: str | None = None
     typesense_host: str = "localhost"
     typesense_port: int = 8108
     typesense_protocol: str = "http"
     typesense_api_key: str = "studymind-typesense-key"
+
+    def get_typesense_node(self) -> dict:
+        if self.typesense_url:
+            from urllib.parse import urlparse
+            parsed = urlparse(self.typesense_url)
+            return {
+                "host":     parsed.hostname,
+                "port":     parsed.port or (443 if parsed.scheme == "https" else 8108),
+                "protocol": parsed.scheme or "http",
+            }
+        return {
+            "host":     self.typesense_host,
+            "port":     int(self.typesense_port),
+            "protocol": self.typesense_protocol,
+        }
 
     # ── Launch gating ─────────────────────────────────────────────────────
     # Comma-separated roles that may self-register. Existing accounts of any role keep working.

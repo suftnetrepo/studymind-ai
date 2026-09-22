@@ -62,14 +62,14 @@ COLLECTION_SCHEMA = {
 
 def get_typesense_client() -> typesense.Client:
     settings = get_settings()
+    node = settings.get_typesense_node()
+
     return typesense.Client({
-        "nodes": [{
-            "host":     settings.typesense_host,
-            "port":     str(settings.typesense_port),
-            "protocol": settings.typesense_protocol,
-        }],
+        "nodes": [node],
         "api_key":                    settings.typesense_api_key,
         "connection_timeout_seconds": 10,
+        "num_retries":                3,
+        "retry_interval_seconds":     0.1,
     })
 
 
@@ -159,7 +159,8 @@ def hybrid_search(
 
     import json, urllib.request
     settings = get_settings()
-    base_url = f"{settings.typesense_protocol}://{settings.typesense_host}:{settings.typesense_port}"
+    node = settings.get_typesense_node()
+    base_url = f"{node['protocol']}://{node['host']}:{node['port']}"
 
     # Try hybrid via multi_search POST — avoids URL length limit with 3072-dim vectors
     try:
