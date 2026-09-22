@@ -14,6 +14,11 @@ COPY . .
 
 RUN mkdir -p /app/uploads
 
+# Copy startup script
+COPY scripts/start.sh /start.sh
+RUN chmod +x /start.sh
+
 EXPOSE 8000
 
-CMD uvicorn app.api.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 2 --log-level info
+# Exec form — uvicorn is PID 1, receives SIGTERM directly
+CMD ["/start.sh"]
