@@ -5,10 +5,14 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.dependencies import require_auth
 from app.db.engine import get_db
 from app.db.models import ChatMessage, ChatSession, Document, DocumentChunk
 from app.db.schemas import HealthResponse, StatsResponse
+from app.logging_config import get_logger
 from app.retrieval.typesense_client import get_typesense_client
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/api", tags=["health"])
 
@@ -29,14 +33,42 @@ async def health(db: AsyncSession = Depends(get_db)):
         ts = get_typesense_client()
         ts.collections.retrieve()
         services["typesense"] = True
-    except Exception:
+    except Exception as e:
         services["typesense"] = False
+        log.warning("typesense_health_failed",
+                    error=str(e),
+                    error_type=type(e).__name__)
 
     all_ok = all(services.values())
     return HealthResponse(
         status="ok" if all_ok else "degraded",
         services=services,
     )
+
+
+@router.get("/debug/typesense")
+async def debug_typesense(current_user = Depends(require_auth)):
+    """TEMPORARY — remove once Typesense connectivity on Render is confirmed working."""
+    from app.config import get_settings
+    settings = get_settings()
+    node = settings.get_typesense_node()
+    try:
+        ts = get_typesense_client()
+        result = ts.collections.retrieve()
+        return {
+            "node":        node,
+            "connected":   True,
+            "collections": len(result),
+            "api_key_prefix": settings.typesense_api_key[:8] + "...",
+        }
+    except Exception as e:
+        return {
+            "node":      node,
+            "connected": False,
+            "error":     str(e),
+            "error_type": type(e).__name__,
+            "api_key_prefix": settings.typesense_api_key[:8] + "...",
+        }
 
 
 @router.get("/stats", response_model=StatsResponse)

@@ -41,7 +41,7 @@ async def lifespan(app: FastAPI):
         ensure_collection(ts)
         log.info("typesense_collection_ready")
     except Exception as e:
-        log.warning("typesense_unavailable", error=str(e))
+        log.warning("typesense_unavailable", error=str(e), error_type=type(e).__name__)
 
     configure_llama_settings()
     log.info("llm_ready")
