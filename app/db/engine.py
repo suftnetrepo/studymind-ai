@@ -13,12 +13,18 @@ class Base(DeclarativeBase):
 
 def _make_engine():
     settings = get_settings()
+    connect_args = {}
+    if settings.database_url:
+        # Managed Postgres (e.g. Neon) requires TLS; asyncpg wants this via
+        # connect_args, not the sslmode/channel_binding query params.
+        connect_args["ssl"] = "require"
     return create_async_engine(
         settings.postgres_dsn,
         pool_size=10,
         max_overflow=20,
         pool_pre_ping=True,
         echo=not settings.is_production,
+        connect_args=connect_args,
     )
 
 

@@ -4,6 +4,8 @@ All values sourced from environment / .env file.
 Pydantic BaseSettings validates every field at startup.
 """
 from functools import lru_cache
+from urllib.parse import urlsplit, urlunsplit
+
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -23,25 +25,35 @@ class Settings(BaseSettings):
     openai_embedding_dimension: int = 3072
 
     # ── PostgreSQL ────────────────────────────────────────────────────────
+    # If DATABASE_URL is set (e.g. a managed Postgres like Neon), it takes
+    # precedence over the discrete postgres_* fields below.
+    database_url: str | None = None
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_db: str = "studymind"
     postgres_user: str = "postgres"
     postgres_password: str = "postgres"
 
-    @property
-    def postgres_dsn(self) -> str:
+    def _dsn_with_driver(self, driver: str) -> str:
+        if self.database_url:
+            parts = urlsplit(self.database_url)
+            scheme = f"postgresql+{driver}"
+            # asyncpg takes SSL via connect_args (see engine.py), not sslmode/
+            # channel_binding query params — psycopg2 (sync) handles them fine.
+            query = "" if driver == "asyncpg" else parts.query
+            return urlunsplit((scheme, parts.netloc, parts.path, query, parts.fragment))
         return (
-            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"postgresql+{driver}://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 
     @property
+    def postgres_dsn(self) -> str:
+        return self._dsn_with_driver("asyncpg")
+
+    @property
     def postgres_dsn_sync(self) -> str:
-        return (
-            f"postgresql+psycopg2://{self.postgres_user}:{self.postgres_password}"
-            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
-        )
+        return self._dsn_with_driver("psycopg2")
 
     # ── Typesense ─────────────────────────────────────────────────────────
     typesense_host: str = "localhost"
