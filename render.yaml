@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: studymind-api
+    runtime: docker
+    region: frankfurt
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 8000
+    healthCheckPath: /api/health
+    autoDeploy: true
