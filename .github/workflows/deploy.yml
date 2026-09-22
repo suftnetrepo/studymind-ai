@@ -1,0 +1,44 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy StudyMind API
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.DO_HOST }}
+          username: root
+          key:      ${{ secrets.DO_SSH_KEY }}
+          script: |
+            set -e
+
+            echo "── Pulling latest code ──"
+            cd /srv/studymind
+            git pull origin main
+
+            echo "── Building new API image ──"
+            docker compose -f docker-compose.prod.yml build api
+
+            echo "── Restarting API (zero downtime) ──"
+            docker compose -f docker-compose.prod.yml up -d --no-deps api
+
+            echo "── Waiting for health check ──"
+            sleep 15
+            HEALTH=$(curl -s http://localhost:8000/api/health | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','down'))")
+
+            if [ "$HEALTH" != "ok" ]; then
+              echo "Health check failed: $HEALTH"
+              exit 1
+            fi
+
+            echo "── Deploy complete — status: $HEALTH ──"
