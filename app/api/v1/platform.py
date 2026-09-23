@@ -1,7 +1,10 @@
 """
 v1 Platform API — lets external platforms (e.g. Learnify) use StudyMind's AI features.
 
-Auth: `Authorization: Bearer sm_live_...` (see app/auth/api_key_auth.py).
+Auth (see app/auth/api_key_auth.py):
+- `Bearer sm_live_...` API key — server-to-server; course_id/user_id come from the request.
+- `Bearer st_...` session token — browser-safe, minted via POST /auth/session and pinned to
+  one course + user; course_id/user_id in the request are optional and must match if given.
 
 Each (api_key, platform course, platform user) maps to a PlatformCourse row and a private
 StudyMind Module owned by a synthetic platform user. Course content is indexed into that
@@ -11,7 +14,7 @@ existing module-scoped pipelines.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -20,10 +23,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
-from app.auth.api_key_auth import get_api_key
+from app.auth.api_key_auth import (
+    PlatformIdentity, generate_session_token, get_api_key, get_platform_identity,
+)
 from app.db.engine import AsyncSessionLocal, get_db
 from app.db.models import (
-    ApiKey, Document, DocumentChunk, Module, ModuleDocument, PlatformCourse, User,
+    ApiKey, Document, DocumentChunk, Module, ModuleDocument, PlatformCourse, SessionToken, User,
 )
 from app.ingestion.ingestor import get_ingestor
 from app.logging_config import get_logger
@@ -50,41 +55,54 @@ class SectionData(BaseModel):
     lectures: list[LectureData] = []
 
 
+USER_ROLE_PATTERN = "^(student|tutor|admin)$"
+
+# course_id / user_id are required with an API key; optional with a session token.
+OptionalId = Optional[str]
+
+
+class CreateSessionRequest(BaseModel):
+    course_id:  str = Field(..., min_length=1, max_length=255)
+    user_id:    str = Field(..., min_length=1, max_length=255)
+    user_role:  str = Field(default="student", pattern=USER_ROLE_PATTERN)
+    expires_in: int = Field(default=3600, ge=300, le=86400, description="Seconds (5 min – 24 h)")
+
+
 class IngestCourseRequest(BaseModel):
-    course_id:   str = Field(..., min_length=1, max_length=255, description="Platform's course ID")
-    user_id:     str = Field(..., min_length=1, max_length=255, description="Platform's user ID")
-    user_role:   str = Field(default="student", description="student|tutor|admin")
+    course_id:   OptionalId = Field(default=None, max_length=255, description="Platform's course ID")
+    user_id:     OptionalId = Field(default=None, max_length=255, description="Platform's user ID")
+    user_role:   str = Field(default="student", pattern=USER_ROLE_PATTERN)
     title:       str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
     sections:    list[SectionData] = []
 
 
 class ChatRequest(BaseModel):
-    course_id:  str
-    user_id:    str
+    course_id:  OptionalId = None
+    user_id:    OptionalId = None
     message:    str = Field(..., min_length=1, max_length=4000)
     session_id: Optional[str] = None
     complexity: str = Field(default="normal", pattern="^(simple|normal|expert)$")
 
 
 class QuizRequest(BaseModel):
-    course_id:      str
-    user_id:        str
+    course_id:      OptionalId = None
+    user_id:        OptionalId = None
     question_count: int = Field(default=5, ge=1, le=20)
     question_type:  str = Field(default="mcq", pattern="^(mcq|short_answer|true_false)$")
     topic:          Optional[str] = None
 
 
 class FlashcardsRequest(BaseModel):
-    course_id: str
-    user_id:   str
+    course_id: OptionalId = None
+    user_id:   OptionalId = None
     max_cards: int = Field(default=20, ge=5, le=50)
     topic:     Optional[str] = None
 
 
 class SummaryRequest(BaseModel):
-    course_id: str
-    user_id:   str
+    course_id: OptionalId = None
+    user_id:   OptionalId = None
     topic:     Optional[str] = None
 
 
@@ -113,11 +131,11 @@ def build_course_text(req: IngestCourseRequest) -> str:
 
 
 async def _find_platform_course(
-    db: AsyncSession, api_key: ApiKey, course_id: str, user_id: str,
+    db: AsyncSession, api_key_id: uuid.UUID, course_id: str, user_id: str,
 ) -> Optional[PlatformCourse]:
     result = await db.execute(
         select(PlatformCourse).where(
-            PlatformCourse.api_key_id         == api_key.id,
+            PlatformCourse.api_key_id         == api_key_id,
             PlatformCourse.platform_course_id == course_id,
             PlatformCourse.platform_user_id   == user_id,
         )
@@ -126,9 +144,10 @@ async def _find_platform_course(
 
 
 async def _get_ready_course(
-    db: AsyncSession, api_key: ApiKey, course_id: str, user_id: str,
+    db: AsyncSession, identity: PlatformIdentity, course_id: OptionalId, user_id: OptionalId,
 ) -> PlatformCourse:
-    pc = await _find_platform_course(db, api_key, course_id, user_id)
+    course_id, user_id = identity.scope(course_id, user_id)
+    pc = await _find_platform_course(db, identity.api_key.id, course_id, user_id)
     if not pc or pc.status != "ready" or not pc.module_id:
         raise HTTPException(
             status_code=400,
@@ -149,7 +168,7 @@ async def get_or_create_module(
     description: Optional[str] = None,
 ) -> tuple[PlatformCourse, Module]:
     """Find or create the PlatformCourse and its backing StudyMind Module."""
-    platform_course = await _find_platform_course(db, api_key, course_id, user_id)
+    platform_course = await _find_platform_course(db, api_key.id, course_id, user_id)
 
     if platform_course and platform_course.module_id:
         module = await db.get(Module, platform_course.module_id)
@@ -336,19 +355,58 @@ async def index_course_content(platform_course_id: uuid.UUID, course_text: str) 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────
 
+@router.post("/auth/session", status_code=201)
+async def create_session(
+    req:     CreateSessionRequest,
+    db:      AsyncSession = Depends(get_db),
+    api_key: ApiKey = Depends(get_api_key),  # API key only — session tokens can't mint tokens
+):
+    """
+    Exchange an API key for a short-lived session token scoped to one course + user.
+    Call this SERVER-SIDE in the host app and pass only the session token to the browser.
+    """
+    pc = await _find_platform_course(db, api_key.id, req.course_id, req.user_id)
+
+    full_token, token_hash = generate_session_token()
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=req.expires_in)
+
+    db.add(SessionToken(
+        id=uuid.uuid4(),
+        token_hash=token_hash,
+        api_key_id=api_key.id,
+        course_id=req.course_id,
+        user_id=req.user_id,
+        user_role=req.user_role,
+        module_id=pc.module_id if pc else None,
+        expires_at=expires_at,
+    ))
+    await db.commit()
+
+    return {
+        "session_token": full_token,
+        "expires_in":    req.expires_in,
+        "expires_at":    expires_at.isoformat(),
+        "course_id":     req.course_id,
+        "user_id":       req.user_id,
+        "course_status": pc.status if pc else "not_found",
+    }
+
+
 @router.post("/courses/ingest", status_code=202)
 async def ingest_course(
     req:              IngestCourseRequest,
     background_tasks: BackgroundTasks,
     db:               AsyncSession = Depends(get_db),
-    api_key:          ApiKey = Depends(get_api_key),
+    identity:         PlatformIdentity = Depends(get_platform_identity),
 ):
     """
     Ingest (or re-ingest) a platform course. Creates a StudyMind module and indexes
     the course content in the background. Poll /api/v1/courses/status for progress.
+    With a session token, only the token's own course can be ingested.
     """
+    course_id, user_id = identity.scope(req.course_id, req.user_id)
     platform_course, module = await get_or_create_module(
-        db, api_key, req.course_id, req.user_id, req.title, req.description,
+        db, identity.api_key, course_id, user_id, req.title, req.description,
     )
 
     platform_course.status = "indexing"
@@ -358,7 +416,7 @@ async def ingest_course(
 
     return {
         "module_id": str(module.id),
-        "course_id": req.course_id,
+        "course_id": course_id,
         "status":    "indexing",
         "message":   "Course content is being indexed. Use /api/v1/courses/status to check.",
     }
@@ -366,13 +424,14 @@ async def ingest_course(
 
 @router.get("/courses/status")
 async def get_course_status(
-    course_id: str,
-    user_id:   str,
+    course_id: OptionalId = None,
+    user_id:   OptionalId = None,
     db:        AsyncSession = Depends(get_db),
-    api_key:   ApiKey = Depends(get_api_key),
+    identity:  PlatformIdentity = Depends(get_platform_identity),
 ):
     """Check indexing status of a course."""
-    pc = await _find_platform_course(db, api_key, course_id, user_id)
+    course_id, user_id = identity.scope(course_id, user_id)
+    pc = await _find_platform_course(db, identity.api_key.id, course_id, user_id)
     if not pc:
         return {"status": "not_found", "message": "Course not ingested yet"}
 
@@ -387,12 +446,12 @@ async def get_course_status(
 
 @router.post("/chat")
 async def platform_chat(
-    req:     ChatRequest,
-    db:      AsyncSession = Depends(get_db),
-    api_key: ApiKey = Depends(get_api_key),
+    req:      ChatRequest,
+    db:       AsyncSession = Depends(get_db),
+    identity: PlatformIdentity = Depends(get_platform_identity),
 ):
     """AI Tutor — answer a question scoped to a platform course."""
-    pc = await _get_ready_course(db, api_key, req.course_id, req.user_id)
+    pc = await _get_ready_course(db, identity, req.course_id, req.user_id)
 
     from app.agents.rag_pipeline import get_pipeline
     result = await run_in_threadpool(
@@ -414,12 +473,12 @@ async def platform_chat(
 
 @router.post("/quiz/generate")
 async def platform_generate_quiz(
-    req:     QuizRequest,
-    db:      AsyncSession = Depends(get_db),
-    api_key: ApiKey = Depends(get_api_key),
+    req:      QuizRequest,
+    db:       AsyncSession = Depends(get_db),
+    identity: PlatformIdentity = Depends(get_platform_identity),
 ):
     """Generate a quiz for a platform course."""
-    pc = await _get_ready_course(db, api_key, req.course_id, req.user_id)
+    pc = await _get_ready_course(db, identity, req.course_id, req.user_id)
 
     from app.agents.ai_features import generate_quiz
     try:
@@ -434,17 +493,17 @@ async def platform_generate_quiz(
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
-    return {"course_id": req.course_id, "questions": questions, "count": len(questions)}
+    return {"course_id": pc.platform_course_id, "questions": questions, "count": len(questions)}
 
 
 @router.post("/flashcards/generate")
 async def platform_generate_flashcards(
-    req:     FlashcardsRequest,
-    db:      AsyncSession = Depends(get_db),
-    api_key: ApiKey = Depends(get_api_key),
+    req:      FlashcardsRequest,
+    db:       AsyncSession = Depends(get_db),
+    identity: PlatformIdentity = Depends(get_platform_identity),
 ):
     """Generate flashcards for a platform course."""
-    pc = await _get_ready_course(db, api_key, req.course_id, req.user_id)
+    pc = await _get_ready_course(db, identity, req.course_id, req.user_id)
 
     from app.agents.ai_features import generate_flashcards
     try:
@@ -457,17 +516,17 @@ async def platform_generate_flashcards(
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
-    return {"course_id": req.course_id, "cards": cards, "count": len(cards)}
+    return {"course_id": pc.platform_course_id, "cards": cards, "count": len(cards)}
 
 
 @router.post("/summarise")
 async def platform_summarise(
-    req:     SummaryRequest,
-    db:      AsyncSession = Depends(get_db),
-    api_key: ApiKey = Depends(get_api_key),
+    req:      SummaryRequest,
+    db:       AsyncSession = Depends(get_db),
+    identity: PlatformIdentity = Depends(get_platform_identity),
 ):
     """Generate a Markdown summary for a platform course."""
-    pc = await _get_ready_course(db, api_key, req.course_id, req.user_id)
+    pc = await _get_ready_course(db, identity, req.course_id, req.user_id)
 
     from app.agents.ai_features import generate_summary
     try:
@@ -480,4 +539,4 @@ async def platform_summarise(
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
-    return {"course_id": req.course_id, "summary": summary}
+    return {"course_id": pc.platform_course_id, "summary": summary}

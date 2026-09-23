@@ -16,10 +16,10 @@ from sqlalchemy.sql.elements import BindParameter, True_
 
 from app.api.main import app
 from app.api.v1 import platform as v1_platform
-from app.auth.api_key_auth import generate_api_key, hash_api_key
+from app.auth.api_key_auth import generate_api_key, generate_session_token, hash_api_key
 from app.auth.dependencies import get_current_user
 from app.db.engine import get_db
-from app.db.models import ApiKey, Module, PlatformCourse, User
+from app.db.models import ApiKey, Module, PlatformCourse, SessionToken, User
 
 
 # ── In-memory session ──────────────────────────────────────────────────────
@@ -234,7 +234,7 @@ class TestApiKeyAuth:
     def test_no_key_401(self, client):
         r = client.get(self.URL)
         assert r.status_code == 401
-        assert r.json()["detail"] == "API key required"
+        assert r.json()["detail"] == "Authentication required"
 
     def test_wrong_key_401(self, client, db):
         make_key(db)
@@ -426,3 +426,201 @@ class TestAiEndpoints:
         assert r.status_code == 200
         assert r.json()["count"] == 1
         assert seen["module_id"] == str(module_id) and seen["question_count"] == 3
+
+
+# ── Session tokens ─────────────────────────────────────────────────────────
+
+def make_session(db: FakeSession, key: ApiKey, course_id="c1", user_id="u1",
+                 expires_in=timedelta(hours=1)) -> str:
+    token, token_hash = generate_session_token()
+    db.add(SessionToken(id=uuid.uuid4(), token_hash=token_hash, api_key_id=key.id,
+                        course_id=course_id, user_id=user_id, user_role="student",
+                        expires_at=datetime.now(timezone.utc) + expires_in))
+    return token
+
+
+def ready_course(db: FakeSession, key: ApiKey, course_id="c1", user_id="u1") -> PlatformCourse:
+    pc = PlatformCourse(id=uuid.uuid4(), api_key_id=key.id, platform_course_id=course_id,
+                        platform_user_id=user_id, module_id=uuid.uuid4(),
+                        course_title="C", status="ready")
+    db.add(pc)
+    return pc
+
+
+class TestCreateSession:
+    def test_creates_st_token(self, client, db):
+        full_key, key = make_key(db)
+        r = client.post("/api/v1/auth/session", headers=auth(full_key),
+                        json={"course_id": "c1", "user_id": "u1"})
+        assert r.status_code == 201
+        body = r.json()
+        assert re.fullmatch(r"st_[0-9a-f]{64}", body["session_token"])
+        assert body["expires_in"] == 3600 and body["course_status"] == "not_found"
+
+        [st] = db.of(SessionToken)
+        assert st.token_hash == hash_api_key(body["session_token"])
+        assert body["session_token"] not in {st.token_hash}
+        assert (st.api_key_id, st.course_id, st.user_id) == (key.id, "c1", "u1")
+
+    def test_links_module_when_already_ingested(self, client, db):
+        full_key, key = make_key(db)
+        pc = ready_course(db, key)
+        body = client.post("/api/v1/auth/session", headers=auth(full_key),
+                           json={"course_id": "c1", "user_id": "u1"}).json()
+        assert body["course_status"] == "ready"
+        assert db.of(SessionToken)[0].module_id == pc.module_id
+
+    @pytest.mark.parametrize("expires_in", [60, 86401])
+    def test_expiry_bounds(self, client, db, expires_in):
+        full_key, _ = make_key(db)
+        r = client.post("/api/v1/auth/session", headers=auth(full_key),
+                        json={"course_id": "c1", "user_id": "u1", "expires_in": expires_in})
+        assert r.status_code == 422
+
+    def test_requires_api_key(self, client):
+        assert client.post("/api/v1/auth/session",
+                           json={"course_id": "c1", "user_id": "u1"}).status_code == 401
+
+    def test_session_token_cannot_mint_tokens(self, client, db):
+        _, key = make_key(db)
+        token = make_session(db, key)
+        r = client.post("/api/v1/auth/session", headers=auth(token),
+                        json={"course_id": "other", "user_id": "u1"})
+        assert r.status_code == 401
+
+
+class TestSessionTokenAuth:
+    def test_chat_with_session_token(self, client, db, monkeypatch):
+        _, key = make_key(db)
+        pc = ready_course(db, key)
+        token = make_session(db, key)
+        seen = {}
+
+        class FakePipeline:
+            def query(self, **kwargs):
+                seen.update(kwargs)
+                return {"answer": "A variable stores data.", "sources": [], "no_content_found": False}
+        monkeypatch.setattr("app.agents.rag_pipeline.get_pipeline", lambda: FakePipeline())
+
+        # No course_id/user_id in the body — taken from the token
+        r = client.post("/api/v1/chat", headers=auth(token), json={"message": "What is a variable?"})
+        assert r.status_code == 200
+        assert r.json()["answer"] == "A variable stores data."
+        assert seen["module_id"] == str(pc.module_id)
+
+    def test_quiz_with_session_token(self, client, db, monkeypatch):
+        _, key = make_key(db)
+        pc = ready_course(db, key)
+        token = make_session(db, key)
+        monkeypatch.setattr("app.agents.ai_features.generate_quiz",
+                            lambda **kw: [{"question": "Q?", "module": kw["module_id"]}])
+        r = client.post("/api/v1/quiz/generate", headers=auth(token),
+                        json={"course_id": "c1", "user_id": "u1", "question_count": 2})
+        assert r.status_code == 200
+        assert r.json()["questions"][0]["module"] == str(pc.module_id)
+        assert r.json()["course_id"] == "c1"
+
+    def test_status_and_usage_tracked(self, client, db):
+        _, key = make_key(db)
+        ready_course(db, key)
+        token = make_session(db, key)
+        r = client.get("/api/v1/courses/status", headers=auth(token))
+        assert r.json()["status"] == "ready"
+        assert key.request_count == 1
+
+    def test_ingest_scoped_to_token_course(self, client, db, monkeypatch):
+        async def fake_index(pc_id, text):
+            pass
+        monkeypatch.setattr(v1_platform, "index_course_content", fake_index)
+        _, key = make_key(db)
+        token = make_session(db, key, course_id="course_001", user_id="student_001")
+        r = client.post("/api/v1/courses/ingest", headers=auth(token),
+                        json={"title": "Intro", "sections": []})
+        assert r.status_code == 202
+        [pc] = db.of(PlatformCourse)
+        assert (pc.platform_course_id, pc.platform_user_id) == ("course_001", "student_001")
+
+    def test_expired_token_401(self, client, db):
+        _, key = make_key(db)
+        ready_course(db, key)
+        token = make_session(db, key, expires_in=timedelta(seconds=-1))
+        r = client.post("/api/v1/chat", headers=auth(token), json={"message": "hi"})
+        assert r.status_code == 401
+        assert r.json()["detail"] == "Session token expired"
+
+    def test_unknown_token_401(self, client, db):
+        make_key(db)
+        fake, _ = generate_session_token()
+        r = client.post("/api/v1/chat", headers=auth(fake), json={"message": "hi"})
+        assert r.status_code == 401
+        assert r.json()["detail"] == "Invalid session token"
+
+    @pytest.mark.parametrize("url,extra", TestAiEndpoints.AI_CALLS)
+    def test_wrong_course_401(self, client, db, url, extra):
+        _, key = make_key(db)
+        ready_course(db, key, course_id="c1")
+        ready_course(db, key, course_id="c2")
+        token = make_session(db, key, course_id="c1")
+        r = client.post(url, headers=auth(token),
+                        json={"course_id": "c2", "user_id": "u1", **extra})
+        assert r.status_code == 401
+
+    def test_wrong_user_401(self, client, db):
+        _, key = make_key(db)
+        token = make_session(db, key, user_id="u1")
+        r = client.get("/api/v1/courses/status", headers=auth(token),
+                       params={"course_id": "c1", "user_id": "someone_else"})
+        assert r.status_code == 401
+
+    def test_revoked_api_key_kills_session(self, client, db):
+        _, key = make_key(db)
+        ready_course(db, key)
+        token = make_session(db, key)
+        key.is_active = False
+        r = client.get("/api/v1/courses/status", headers=auth(token))
+        assert r.status_code == 401
+
+    def test_admin_rejects_session_token(self, client, db):
+        _, key = make_key(db)
+        token = make_session(db, key)
+        assert client.get("/api/v1/admin/api-keys", headers=auth(token)).status_code == 401
+
+
+class TestApiKeyBackwardCompat:
+    """sm_live_ keys keep working on every endpoint with course_id/user_id in the request."""
+
+    @pytest.fixture
+    def setup(self, db, monkeypatch):
+        full_key, key = make_key(db)
+        ready_course(db, key)
+
+        class FakePipeline:
+            def query(self, **kw):
+                return {"answer": "ok", "sources": [], "no_content_found": False}
+        monkeypatch.setattr("app.agents.rag_pipeline.get_pipeline", lambda: FakePipeline())
+        monkeypatch.setattr("app.agents.ai_features.generate_quiz", lambda **kw: [{"q": 1}])
+        monkeypatch.setattr("app.agents.ai_features.generate_flashcards", lambda **kw: [{"c": 1}])
+        monkeypatch.setattr("app.agents.ai_features.generate_summary", lambda **kw: ("## S", 1))
+
+        async def fake_index(pc_id, text):
+            pass
+        monkeypatch.setattr(v1_platform, "index_course_content", fake_index)
+        return full_key
+
+    @pytest.mark.parametrize("url,extra", TestAiEndpoints.AI_CALLS)
+    def test_ai_endpoints(self, client, setup, url, extra):
+        r = client.post(url, headers=auth(setup), json={"course_id": "c1", "user_id": "u1", **extra})
+        assert r.status_code == 200
+
+    def test_status_and_ingest(self, client, setup):
+        r = client.get("/api/v1/courses/status", headers=auth(setup),
+                       params={"course_id": "c1", "user_id": "u1"})
+        assert r.json()["status"] == "ready"
+        r = client.post("/api/v1/courses/ingest", headers=auth(setup),
+                        json={"course_id": "c9", "user_id": "u1", "title": "New"})
+        assert r.status_code == 202
+
+    @pytest.mark.parametrize("url,extra", TestAiEndpoints.AI_CALLS)
+    def test_api_key_requires_course_and_user(self, client, setup, url, extra):
+        r = client.post(url, headers=auth(setup), json=extra)
+        assert r.status_code == 422

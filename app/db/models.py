@@ -672,3 +672,26 @@ class PlatformCourse(Base):
     updated_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
     )
+
+
+class SessionToken(Base):
+    """
+    Short-lived browser token minted from an API key via POST /api/v1/auth/session.
+    Scoped to one platform course + user; only the SHA-256 hash is stored.
+    """
+    __tablename__ = "session_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    api_key_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False
+    )
+    course_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_role: Mapped[str] = mapped_column(String(32), default="student", nullable=False)
+    # Snapshot at mint time — informational only; access is checked via course_id/user_id
+    module_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
