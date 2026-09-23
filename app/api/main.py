@@ -21,6 +21,8 @@ from app.api.modules import router as modules_router
 from app.api.writing import router as writing_router
 from app.api.onboarding import router as onboarding_router
 from app.api.activity import router as activity_router
+from app.api.v1 import admin as v1_admin
+from app.api.v1 import platform as v1_platform
 from app.db.engine import create_all_tables
 from app.logging_config import configure_logging, get_logger
 from app.retrieval.typesense_client import ensure_collection, get_typesense_client
@@ -86,6 +88,9 @@ def create_app() -> FastAPI:
     app.include_router(writing_router)
     app.include_router(onboarding_router)
     app.include_router(activity_router)
+    # v1 platform integrations (API-key auth) + key management (admin JWT)
+    app.include_router(v1_platform.router, prefix="/api")
+    app.include_router(v1_admin.router, prefix="/api")
     # NOTE: the legacy unauthenticated /api/documents router is intentionally not mounted; all
     # document access goes through the authenticated /api/modules/{id}/documents endpoints.
     app.include_router(health_router)

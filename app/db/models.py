@@ -616,3 +616,59 @@ class StudyActivity(Base):
         UniqueConstraint("user_id", "activity_type", "module_id", "activity_date", name="uq_study_activity"),
     )
 
+
+
+# ── v1 Platform API: API keys + platform courses ───────────────────────────
+
+class ApiKey(Base):
+    """Credential for an external platform (e.g. Learnify). Only the SHA-256 hash is stored."""
+    __tablename__ = "api_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    key_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
+    # 'learnify' | 'moodle' | 'canvas' | ...
+    platform: Mapped[str] = mapped_column(String(64), nullable=False)
+    owner_email: Mapped[str] = mapped_column(String(320), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    request_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PlatformCourse(Base):
+    """Tracks a platform course (per platform user) indexed into a StudyMind module."""
+    __tablename__ = "platform_courses"
+    __table_args__ = (
+        UniqueConstraint(
+            "api_key_id", "platform_course_id", "platform_user_id", name="uq_platform_course"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    api_key_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False
+    )
+    # Platform's own IDs — strings to support any platform
+    platform_course_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    platform_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    module_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("modules.id", ondelete="SET NULL"), nullable=True
+    )
+    course_title: Mapped[str] = mapped_column(String(255), nullable=False)
+    course_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # pending | indexing | ready | failed
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    indexed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
+    )
