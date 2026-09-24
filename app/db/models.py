@@ -741,3 +741,28 @@ class PlatformDocument(Base):
     __table_args__ = (
         Index("ix_platform_documents_course", "api_key_id", "platform_course_id"),
     )
+
+
+class PlatformSummary(Base):
+    """
+    Latest generated summary per platform course + user + topic, so the panel can show it
+    again after a reload or new login. `topic` is '' for "all content" (a NULL would defeat the
+    unique constraint — Postgres treats NULLs as distinct).
+    """
+    __tablename__ = "platform_summaries"
+    __table_args__ = (
+        UniqueConstraint("api_key_id", "course_id", "user_id", "topic", name="uq_platform_summary"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    api_key_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False
+    )
+    course_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    topic: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    complexity: Mapped[str] = mapped_column(String(16), default="normal", nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )

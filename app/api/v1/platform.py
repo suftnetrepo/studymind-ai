@@ -31,7 +31,7 @@ from app.auth.api_key_auth import (
 from app.db.engine import AsyncSessionLocal, get_db
 from app.db.models import (
     ApiKey, ChatMessage, ChatSession, Document, DocumentChunk, Module, ModuleDocument, PlatformCourse,
-    PlatformDocument, SessionToken, User,
+    PlatformDocument, PlatformSummary, SessionToken, User,
 )
 from app.ingestion.ingestor import get_ingestor
 from app.logging_config import get_logger
@@ -796,7 +796,10 @@ async def platform_summarise(
     db:       AsyncSession = Depends(get_db),
     identity: PlatformIdentity = Depends(get_platform_identity),
 ):
-    """Generate a Markdown summary for a platform course."""
+    """
+    Generate a Markdown summary for a platform course. The latest summary per
+    course + user + topic is saved (see GET /summary) and replaced on regeneration.
+    """
     pc = await _get_ready_course(db, identity, req.course_id, req.user_id)
 
     from app.agents.ai_features import generate_summary
@@ -811,4 +814,68 @@ async def platform_summarise(
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
-    return {"course_id": pc.platform_course_id, "summary": summary}
+    saved = await _save_summary(db, identity, pc, (req.topic or "").strip(), req.complexity, summary)
+    return {"course_id": pc.platform_course_id, **_summary_payload(saved)}
+
+
+async def _save_summary(
+    db: AsyncSession, identity: PlatformIdentity, course: ReadyCourse,
+    topic: str, complexity: str, content: str,
+) -> PlatformSummary:
+    """Upsert the latest summary for course + user + topic ('' = all content)."""
+    api_key_id = identity.api_key.id
+    await _xact_lock(db, f"platform_summary:{api_key_id}:{course.platform_course_id}:{course.platform_user_id}:{topic}")
+    result = await db.execute(
+        select(PlatformSummary).where(
+            PlatformSummary.api_key_id == api_key_id,
+            PlatformSummary.course_id  == course.platform_course_id,
+            PlatformSummary.user_id    == course.platform_user_id,
+            PlatformSummary.topic      == topic,
+        )
+    )
+    row = result.scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if row is None:
+        row = PlatformSummary(
+            id=uuid.uuid4(), api_key_id=api_key_id, course_id=course.platform_course_id,
+            user_id=course.platform_user_id, topic=topic,
+        )
+        db.add(row)
+    row.content    = content
+    row.complexity = complexity
+    row.created_at = now
+    await db.commit()
+    return row
+
+
+def _summary_payload(row: Optional[PlatformSummary]) -> dict:
+    return {
+        "summary":    row.content if row else None,
+        "topic":      (row.topic or None) if row else None,   # '' → null = all content
+        "complexity": row.complexity if row else None,
+        "created_at": row.created_at.isoformat() if row and row.created_at else None,
+    }
+
+
+@router.get("/summary")
+async def get_summary(
+    course_id: OptionalId = None,
+    user_id:   OptionalId = None,
+    topic:     Optional[str] = Query(default=None, description="Omit for the most recent summary on any topic"),
+    db:        AsyncSession = Depends(get_db),
+    identity:  PlatformIdentity = Depends(get_platform_identity),
+):
+    """
+    The user's saved summary for a course: for `topic` if given ('' = all content),
+    otherwise the most recent one on any topic. All fields null if there's none.
+    """
+    course_id, user_id = identity.scope(course_id, user_id)
+    query = select(PlatformSummary).where(
+        PlatformSummary.api_key_id == identity.api_key.id,
+        PlatformSummary.course_id  == course_id,
+        PlatformSummary.user_id    == user_id,
+    )
+    if topic is not None:
+        query = query.where(PlatformSummary.topic == topic.strip())
+    result = await db.execute(query.order_by(PlatformSummary.created_at.desc()).limit(1))
+    return _summary_payload(result.scalars().first())
