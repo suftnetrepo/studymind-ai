@@ -417,3 +417,82 @@ class TestSharedCourseModule:
                     json={"course_id": "c1", "user_id": "stu_1", **INGEST})
         pc = db.scalars(select(PlatformCourse)).one()
         assert pc.status == "failed" and pc.error_message == "unreadable"
+
+
+# ── AI features on upload-only courses ─────────────────────────────────────
+
+AI_CALLS = [
+    ("/api/v1/chat",                {"message": "What is in the notes?"}),
+    ("/api/v1/quiz/generate",       {"question_count": 2}),
+    ("/api/v1/flashcards/generate", {"max_cards": 5}),
+    ("/api/v1/summarise",           {}),
+]
+
+
+@pytest.fixture
+def ai_fakes(monkeypatch):
+    """Record which module each AI feature searched."""
+    seen = []
+
+    class Pipeline:
+        def query(self, **kw):
+            seen.append(kw["module_id"])
+            return {"answer": "From the notes.", "sources": [], "no_content_found": False}
+
+    def feature(result):
+        def fn(**kw):
+            seen.append(kw["module_id"])
+            return result
+        return fn
+
+    monkeypatch.setattr("app.agents.rag_pipeline.get_pipeline", lambda: Pipeline())
+    monkeypatch.setattr("app.agents.ai_features.generate_quiz", feature([{"question": "Q?"}]))
+    monkeypatch.setattr("app.agents.ai_features.generate_flashcards", feature([{"front": "A", "back": "B"}]))
+    monkeypatch.setattr("app.agents.ai_features.generate_summary", feature(("## Summary", 1)))
+    return seen
+
+
+class TestUploadOnlyCourse:
+    """Platforms may upload materials without ever calling /courses/ingest."""
+
+    @pytest.mark.parametrize("url,extra", AI_CALLS)
+    def test_uploader_can_use_ai(self, client, db, api_key, fakes, ai_fakes, url, extra):
+        pdoc_id = upload(client, api_key, user_id="tutor_1").json()["id"]
+        r = client.post(url, headers=auth(api_key), json={"course_id": "c1", "user_id": "tutor_1", **extra})
+        assert r.status_code == 200, r.text
+        assert ai_fakes == [str(db.get(PlatformDocument, uuid.UUID(pdoc_id)).module_id)]
+
+    @pytest.mark.parametrize("url,extra", AI_CALLS)
+    def test_other_student_without_course_row_can_use_ai(self, client, db, api_key, fakes, ai_fakes, url, extra):
+        upload(client, api_key, user_id="tutor_1")
+        r = client.post(url, headers=auth(api_key), json={"course_id": "c1", "user_id": "stu_9", **extra})
+        assert r.status_code == 200, r.text
+        if url != "/api/v1/chat":
+            assert r.json()["course_id"] == "c1"
+
+    def test_student_session_token_can_chat(self, client, api_key, fakes, ai_fakes):
+        upload(client, api_key, user_id="tutor_1")
+        token = session_token(client, api_key, user_id="stu_1", role="student")
+        r = client.post("/api/v1/chat", headers=auth(token), json={"message": "hi"})
+        assert r.status_code == 200 and r.json()["answer"] == "From the notes."
+
+    @pytest.mark.parametrize("url,extra", AI_CALLS)
+    def test_only_failed_document_400(self, client, api_key, fakes, ai_fakes, url, extra):
+        upload(client, api_key, filename="scan.pdf", content=b"FAIL", user_id="tutor_1")
+        r = client.post(url, headers=auth(api_key), json={"course_id": "c1", "user_id": "stu_1", **extra})
+        assert r.status_code == 400 and ai_fakes == []
+
+    def test_document_still_indexing_400(self, client, db, api_key, fakes, ai_fakes):
+        pdoc_id = upload(client, api_key, user_id="tutor_1").json()["id"]
+        db.get(PlatformDocument, uuid.UUID(pdoc_id)).status = "indexing"
+        db.commit()
+        r = client.post("/api/v1/chat", headers=auth(api_key),
+                        json={"course_id": "c1", "user_id": "tutor_1", "message": "hi"})
+        assert r.status_code == 400
+        assert "pending" in r.json()["detail"]  # the uploader's course row, created by the upload
+
+    def test_other_courses_documents_dont_count(self, client, api_key, fakes, ai_fakes):
+        upload(client, api_key, course_id="c2", user_id="tutor_1")
+        r = client.post("/api/v1/chat", headers=auth(api_key),
+                        json={"course_id": "c1", "user_id": "tutor_1", "message": "hi"})
+        assert r.status_code == 400 and "not_found" in r.json()["detail"]

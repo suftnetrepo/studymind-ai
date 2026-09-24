@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -29,7 +30,8 @@ from app.auth.api_key_auth import (
 )
 from app.db.engine import AsyncSessionLocal, get_db
 from app.db.models import (
-    ApiKey, Document, DocumentChunk, Module, ModuleDocument, PlatformCourse, SessionToken, User,
+    ApiKey, Document, DocumentChunk, Module, ModuleDocument, PlatformCourse, PlatformDocument,
+    SessionToken, User,
 )
 from app.ingestion.ingestor import get_ingestor
 from app.logging_config import get_logger
@@ -144,20 +146,49 @@ async def _find_platform_course(
     return result.scalar_one_or_none()
 
 
+@dataclass
+class ReadyCourse:
+    """What the AI endpoints need: the course and the module to search."""
+    platform_course_id: str
+    module_id:          uuid.UUID
+    course_title:       str
+
+
 async def _get_ready_course(
     db: AsyncSession, identity: PlatformIdentity, course_id: OptionalId, user_id: OptionalId,
-) -> PlatformCourse:
+) -> ReadyCourse:
+    """
+    A course is ready for AI when this user's course content is indexed, OR when the course has
+    at least one indexed uploaded document (platforms may upload materials without ever calling
+    /courses/ingest, and students need no PlatformCourse row of their own to use them).
+    """
     course_id, user_id = identity.scope(course_id, user_id)
     pc = await _find_platform_course(db, identity.api_key.id, course_id, user_id)
-    if not pc or pc.status != "ready" or not pc.module_id:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Course not ready for AI. Status: {pc.status if pc else 'not_found'}. "
-                "Call /api/v1/courses/ingest first."
-            ),
+    if pc and pc.status == "ready" and pc.module_id:
+        return ReadyCourse(course_id, pc.module_id, pc.course_title)
+
+    doc_result = await db.execute(
+        select(PlatformDocument)
+        .where(
+            PlatformDocument.api_key_id         == identity.api_key.id,
+            PlatformDocument.platform_course_id == course_id,
+            PlatformDocument.status             == "ready",
+            PlatformDocument.module_id.is_not(None),
         )
-    return pc
+        .limit(1)
+    )
+    ready_doc = doc_result.scalars().first()
+    if ready_doc:
+        title = pc.course_title if pc else f"Course {course_id}"
+        return ReadyCourse(course_id, ready_doc.module_id, title)
+
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"Course not ready for AI. Status: {pc.status if pc else 'not_found'}. "
+            "Call /api/v1/courses/ingest or upload course materials first."
+        ),
+    )
 
 
 async def _xact_lock(db: AsyncSession, key: str) -> None:
