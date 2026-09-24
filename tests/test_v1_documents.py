@@ -365,6 +365,21 @@ INGEST = {"title": "Python 101", "sections": [{"title": "Basics", "lectures": [{
 
 
 class TestSharedCourseModule:
+    @pytest.mark.asyncio
+    async def test_concurrent_first_requests_share_one_module(self, client, db, api_key, fakes):
+        """A panel's parallel first requests must not race into duplicate users/modules (was a 500)."""
+        import asyncio
+        import httpx
+        body = {"course_id": "c1", "user_id": "tutor_1", **INGEST}
+        transport = httpx.ASGITransport(app=app)  # one event loop, real concurrency
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            responses = await asyncio.gather(*[
+                ac.post("/api/v1/courses/ingest", headers=auth(api_key), json=body) for _ in range(4)
+            ])
+        assert [r.status_code for r in responses if r.status_code >= 400] == []
+        assert db.scalar(select(func.count()).select_from(Module)) == 1
+        assert db.scalar(select(func.count()).select_from(PlatformCourse)) == 1
+
     def test_tutor_materials_reach_students(self, client, db, api_key, fakes):
         pdoc_id = upload(client, api_key, user_id="tutor_1").json()["id"]
         r = client.post("/api/v1/courses/ingest", headers=auth(api_key),

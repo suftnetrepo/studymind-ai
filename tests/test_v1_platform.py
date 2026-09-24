@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.sql.dml import Update
-from sqlalchemy.sql.elements import BindParameter, True_
+from sqlalchemy.sql.elements import BindParameter, TextClause, True_
 
 from app.api.main import app
 from app.api.v1 import platform as v1_platform
@@ -74,7 +74,9 @@ class FakeSession:
     def of(self, cls):
         return [o for o in self.objects if isinstance(o, cls)]
 
-    async def execute(self, stmt):
+    async def execute(self, stmt, params=None):
+        if isinstance(stmt, TextClause):  # pg_advisory_xact_lock — no-op here
+            return FakeResult([])
         params = stmt.compile().params
         if isinstance(stmt, Update):
             key = await self.get(ApiKey, params["id_1"])

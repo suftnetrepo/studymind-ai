@@ -20,7 +20,7 @@ from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -160,6 +160,15 @@ async def _get_ready_course(
     return pc
 
 
+async def _xact_lock(db: AsyncSession, key: str) -> None:
+    """
+    Transaction-scoped Postgres advisory lock (released on commit/rollback). Serialises
+    concurrent first-time creation of the same course/user — e.g. a panel's parallel initial
+    requests — which would otherwise race on unique constraints or split a course across modules.
+    """
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": key})
+
+
 async def _shared_module(db: AsyncSession, api_key_id: uuid.UUID, course_id: str) -> Optional[Module]:
     """The course's shared module: the one linked from its earliest PlatformCourse row."""
     result = await db.execute(
@@ -178,6 +187,7 @@ async def _shared_module(db: AsyncSession, api_key_id: uuid.UUID, course_id: str
 async def _platform_user(db: AsyncSession, platform: str, user_id: str) -> User:
     """Synthetic StudyMind user for a platform user (owns modules/documents; never logs in)."""
     email  = platform_user_email(platform, user_id)
+    await _xact_lock(db, f"platform_user:{email}")
     result = await db.execute(select(User).where(User.email == email))
     user   = result.scalar_one_or_none()
     if not user:
@@ -208,6 +218,8 @@ async def get_or_create_module(
     `title`/`description` update the course metadata when given (course ingest);
     callers without course metadata (document upload) pass None to leave it unchanged.
     """
+    # Always lock the course before the user (see _platform_user) — consistent order, no deadlock
+    await _xact_lock(db, f"platform_course:{api_key.id}:{course_id}")
     platform_course = await _find_platform_course(db, api_key.id, course_id, user_id)
 
     module = None
