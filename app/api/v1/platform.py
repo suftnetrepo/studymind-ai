@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,8 +30,8 @@ from app.auth.api_key_auth import (
 )
 from app.db.engine import AsyncSessionLocal, get_db
 from app.db.models import (
-    ApiKey, Document, DocumentChunk, Module, ModuleDocument, PlatformCourse, PlatformDocument,
-    SessionToken, User,
+    ApiKey, ChatMessage, ChatSession, Document, DocumentChunk, Module, ModuleDocument, PlatformCourse,
+    PlatformDocument, SessionToken, User,
 )
 from app.ingestion.ingestor import get_ingestor
 from app.logging_config import get_logger
@@ -42,6 +42,7 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/v1", tags=["Platform API"])
 
 COURSE_CONTENT_FILENAME = "course_content.txt"
+CHAT_HISTORY_TURNS      = 10   # previous Q&A pairs sent to the model as context
 
 
 # ── Request schemas ────────────────────────────────────────────────────────
@@ -150,6 +151,7 @@ async def _find_platform_course(
 class ReadyCourse:
     """What the AI endpoints need: the course and the module to search."""
     platform_course_id: str
+    platform_user_id:   str
     module_id:          uuid.UUID
     course_title:       str
 
@@ -165,7 +167,7 @@ async def _get_ready_course(
     course_id, user_id = identity.scope(course_id, user_id)
     pc = await _find_platform_course(db, identity.api_key.id, course_id, user_id)
     if pc and pc.status == "ready" and pc.module_id:
-        return ReadyCourse(course_id, pc.module_id, pc.course_title)
+        return ReadyCourse(course_id, user_id, pc.module_id, pc.course_title)
 
     doc_result = await db.execute(
         select(PlatformDocument)
@@ -180,7 +182,7 @@ async def _get_ready_course(
     ready_doc = doc_result.scalars().first()
     if ready_doc:
         title = pc.course_title if pc else f"Course {course_id}"
-        return ReadyCourse(course_id, ready_doc.module_id, title)
+        return ReadyCourse(course_id, user_id, ready_doc.module_id, title)
 
     raise HTTPException(
         status_code=400,
@@ -453,6 +455,85 @@ async def index_course_content(platform_course_id: uuid.UUID, course_text: str) 
                 await db.commit()
 
 
+# ── Platform chat persistence ──────────────────────────────────────────────
+# One ChatSession per (platform user, course module), owned by the synthetic platform
+# User — the existing chat schema, no platform-specific columns needed.
+
+async def _course_module_ids(
+    db: AsyncSession, api_key_id: uuid.UUID, course_id: str, user_id: str,
+) -> list[uuid.UUID]:
+    """Every module this course's content may live in (normally just the shared one)."""
+    ids: list[uuid.UUID] = []
+    pc = await _find_platform_course(db, api_key_id, course_id, user_id)
+    if pc and pc.module_id:
+        ids.append(pc.module_id)
+    shared = await _shared_module(db, api_key_id, course_id)
+    if shared:
+        ids.append(shared.id)
+    doc_modules = await db.execute(
+        select(PlatformDocument.module_id).where(
+            PlatformDocument.api_key_id         == api_key_id,
+            PlatformDocument.platform_course_id == course_id,
+            PlatformDocument.module_id.is_not(None),
+        ).distinct()
+    )
+    ids.extend(doc_modules.scalars().all())
+    return list(dict.fromkeys(ids))
+
+
+async def _latest_chat_session(
+    db: AsyncSession, owner_id: uuid.UUID, module_ids: list[uuid.UUID],
+) -> Optional[ChatSession]:
+    if not module_ids:
+        return None
+    result = await db.execute(
+        select(ChatSession)
+        .where(
+            ChatSession.user_id   == owner_id,
+            ChatSession.module_id.in_(module_ids),
+            ChatSession.is_active == True,  # noqa: E712
+        )
+        .order_by(ChatSession.updated_at.desc())
+        .limit(1)
+    )
+    return result.scalars().first()
+
+
+async def _get_or_create_chat_session(
+    db: AsyncSession, identity: PlatformIdentity, course: ReadyCourse,
+) -> ChatSession:
+    owner = await _platform_user(db, identity.api_key.platform, course.platform_user_id)
+    await _xact_lock(db, f"platform_chat:{owner.id}:{course.module_id}")
+    session = await _latest_chat_session(db, owner.id, [course.module_id])
+    if session is None:
+        session = ChatSession(
+            id=uuid.uuid4(),
+            user_id=owner.id,
+            module_id=course.module_id,
+            title=f"{course.course_title}"[:255],
+            session_metadata={
+                "source":             "platform",
+                "api_key_id":         str(identity.api_key.id),
+                "platform_course_id": course.platform_course_id,
+                "platform_user_id":   course.platform_user_id,
+            },
+        )
+        db.add(session)
+        await db.flush()
+    return session
+
+
+async def _recent_turns(db: AsyncSession, session_id: uuid.UUID, turns: int) -> list[dict]:
+    """The last `turns` Q&A pairs, oldest first — conversation context for the model."""
+    result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(turns * 2)
+    )
+    return [{"role": m.role, "content": m.content} for m in reversed(result.scalars().all())]
+
+
 # ── Endpoints ──────────────────────────────────────────────────────────────
 
 @router.post("/auth/session", status_code=201)
@@ -570,26 +651,88 @@ async def platform_chat(
     db:       AsyncSession = Depends(get_db),
     identity: PlatformIdentity = Depends(get_platform_identity),
 ):
-    """AI Tutor — answer a question scoped to a platform course."""
-    pc = await _get_ready_course(db, identity, req.course_id, req.user_id)
+    """
+    AI Tutor — answer a question scoped to a platform course. The conversation is stored
+    per course + user (see /chat/history), and recent turns are sent as context.
+    """
+    course  = await _get_ready_course(db, identity, req.course_id, req.user_id)
+    session = await _get_or_create_chat_session(db, identity, course)
+    history = await _recent_turns(db, session.id, CHAT_HISTORY_TURNS)
+
+    db.add(ChatMessage(session_id=session.id, role="user", content=req.message))
+    await db.commit()  # save the question (and release locks) before the slow LLM call
 
     from app.agents.rag_pipeline import get_pipeline
     result = await run_in_threadpool(
         get_pipeline().query,
         question=req.message,
-        module_id=str(pc.module_id),
+        history=history,
+        module_id=str(course.module_id),
         scope_mode="everything",
         complexity=req.complexity,
         # Broad questions about the course/material should still get an answer from its content
         fallback_top_k=4,
     )
 
+    db.add(ChatMessage(
+        session_id=session.id,
+        role="assistant",
+        content=result["answer"],
+        sources=[s.model_dump() for s in result["sources"]],
+        latency_ms=result.get("latency_ms"),
+        token_count=result.get("token_count"),
+    ))
+    session.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+
     return {
         "answer":           result["answer"],
         "sources":          result["sources"],
         "no_content_found": result["no_content_found"],
-        # Echoed back; conversation history is not persisted for platform chats yet
-        "session_id":       req.session_id,
+        "session_id":       str(session.id),
+    }
+
+
+@router.get("/chat/history")
+async def get_chat_history(
+    course_id: OptionalId = None,
+    user_id:   OptionalId = None,
+    limit:     int = Query(default=50, ge=1, le=200),
+    db:        AsyncSession = Depends(get_db),
+    identity:  PlatformIdentity = Depends(get_platform_identity),
+):
+    """
+    The user's saved conversation for a course (latest `limit` messages, oldest first),
+    so the panel can restore it after a reload or a new login. Empty if none yet.
+    """
+    course_id, user_id = identity.scope(course_id, user_id)
+
+    owner = (await db.execute(
+        select(User).where(User.email == platform_user_email(identity.api_key.platform, user_id))
+    )).scalar_one_or_none()
+    session = None
+    if owner:
+        module_ids = await _course_module_ids(db, identity.api_key.id, course_id, user_id)
+        session = await _latest_chat_session(db, owner.id, module_ids)
+    if session is None:
+        return {"session_id": None, "messages": []}
+
+    result = await db.execute(
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session.id)
+        .order_by(ChatMessage.created_at.desc())
+        .limit(limit)
+    )
+    messages = list(reversed(result.scalars().all()))
+    return {
+        "session_id": str(session.id),
+        "messages": [{
+            "id":        str(m.id),
+            "role":      m.role,
+            "content":   m.content,
+            "sources":   m.sources or [],
+            "timestamp": m.created_at.isoformat(),
+        } for m in messages],
     }
 
 
