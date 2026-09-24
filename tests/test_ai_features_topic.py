@@ -45,3 +45,31 @@ def test_no_topic_leaves_prompt_unchanged(captured, generate):
 
 def test_blank_topic_ignored():
     assert ai_features._with_topic_focus("P", "   ") == "P"
+
+
+# ── Complexity ─────────────────────────────────────────────────────────────
+
+COMPLEX_GENERATORS = [
+    ("quiz",       lambda c: ai_features.generate_quiz(module_id="m", question_count=2, complexity=c)),
+    ("flashcards", lambda c: ai_features.generate_flashcards(module_id="m", max_cards=5, complexity=c)),
+    ("summary",    lambda c: ai_features.generate_summary(module_id="m", scope="module", complexity=c)),
+]
+
+
+@pytest.mark.parametrize("feature,generate", COMPLEX_GENERATORS)
+@pytest.mark.parametrize("level", ["simple", "expert"])
+def test_complexity_guidance_in_prompt(captured, feature, generate, level):
+    generate(level)
+    assert captured["prompts"][0].startswith(ai_features._COMPLEXITY_GUIDANCE[feature][level])
+
+
+@pytest.mark.parametrize("feature,generate", COMPLEX_GENERATORS)
+def test_normal_complexity_leaves_prompt_unchanged(captured, feature, generate):
+    generate("normal")
+    assert not any(g in captured["prompts"][0] for g in ai_features._COMPLEXITY_GUIDANCE[feature].values())
+
+
+def test_topic_and_complexity_combine(captured):
+    ai_features.generate_quiz(module_id="m", question_count=2, topic="Loops", complexity="expert")
+    p = captured["prompts"][0]
+    assert p.startswith("DIFFICULTY: EXPERT") and 'about "Loops"' in p

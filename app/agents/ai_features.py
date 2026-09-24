@@ -85,6 +85,35 @@ def _with_topic_focus(prompt: str, topic: str | None) -> str:
     )
 
 
+# Difficulty guidance per feature. "normal" leaves the prompt unchanged.
+_COMPLEXITY_GUIDANCE: dict[str, dict[str, str]] = {
+    "quiz": {
+        "simple": "DIFFICULTY: SIMPLE — straightforward recall questions in plain, everyday language. "
+                  "Avoid jargon; keep options short; wrong options should be clearly wrong.",
+        "expert": "DIFFICULTY: EXPERT — challenging questions that test deeper understanding: application, "
+                  "comparison, edge cases and why things work. Use precise technical terminology and "
+                  "make the wrong options plausible.",
+    },
+    "flashcards": {
+        "simple": "LEVEL: SIMPLE — explain each back side in plain, everyday language for a beginner, "
+                  "one or two short sentences, with an everyday analogy where it helps. Avoid jargon.",
+        "expert": "LEVEL: EXPERT — make each back side precise and technical: exact definitions, nuances, "
+                  "edge cases and a short example (e.g. code) where relevant.",
+    },
+    "summary": {
+        "simple": "LEVEL: SIMPLE — write for a beginner: plain language, short sentences, everyday "
+                  "analogies, and explain any technical term the first time it appears.",
+        "expert": "LEVEL: EXPERT — write for an advanced student: technical depth, precise terminology, "
+                  "nuances, trade-offs and edge cases.",
+    },
+}
+
+
+def _with_complexity(prompt: str, feature: str, complexity: str | None) -> str:
+    guidance = _COMPLEXITY_GUIDANCE.get(feature, {}).get(complexity or "normal")
+    return f"{guidance}\n\n{prompt}" if guidance else prompt
+
+
 def _call_llm_json(prompt: str) -> Any:
     """
     Call GPT-4o and parse the JSON response.
@@ -148,6 +177,7 @@ def generate_quiz(
     question_type: str      = "mcq",
     title: str              = "Quiz",
     topic: str | None       = None,
+    complexity: str         = "normal",
 ) -> list[dict]:
     """
     QUIZ-01/02/03: Generate quiz questions from module/week/document content.
@@ -177,6 +207,7 @@ def generate_quiz(
         q_type=q_type_label,
         context=context[:12000],  # stay within context window
     ), topic)
+    prompt = _with_complexity(prompt, "quiz", complexity)
 
     questions_raw = _call_llm_json(prompt)
 
@@ -300,6 +331,7 @@ def generate_flashcards(
     student_id: str         = "",
     max_cards: int          = 20,
     topic: str | None       = None,
+    complexity: str         = "normal",
 ) -> list[dict]:
     """
     FLASH-01/02: Generate flashcard deck from module/week/document content.
@@ -322,6 +354,7 @@ def generate_flashcards(
         count=max_cards,
         context=context[:12000],
     ), topic)
+    prompt = _with_complexity(prompt, "flashcards", complexity)
 
     cards_raw = _call_llm_json(prompt)
 
@@ -387,6 +420,7 @@ def generate_summary(
     student_id: str         = "",
     scope: str              = "document",
     topic: str | None       = None,
+    complexity: str         = "normal",
 ) -> tuple[str, int]:
     """
     SUM-01/02: Generate a structured Markdown summary.
@@ -414,6 +448,7 @@ def generate_summary(
         scope=scope_labels.get(scope, scope),
         context=context[:14000],
     ), topic)
+    prompt  = _with_complexity(prompt, "summary", complexity)
 
     llm     = get_llm()
     result  = llm.complete(prompt)

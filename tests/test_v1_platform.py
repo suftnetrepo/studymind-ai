@@ -580,6 +580,22 @@ class TestApiKeyBackwardCompat:
                         json={"course_id": "c9", "user_id": "u1", "title": "New"})
         assert r.status_code == 202
 
+    @pytest.mark.parametrize("fn,url", [
+        ("generate_quiz", "/api/v1/quiz/generate"),
+        ("generate_flashcards", "/api/v1/flashcards/generate"),
+        ("generate_summary", "/api/v1/summarise"),
+    ])
+    def test_complexity_passed_through(self, client, setup, monkeypatch, fn, url):
+        seen = {}
+        result = ("## S", 1) if fn == "generate_summary" else [{"x": 1}]
+        monkeypatch.setattr(f"app.agents.ai_features.{fn}", lambda **kw: seen.update(kw) or result)
+        r = client.post(url, headers=auth(setup), json={"course_id": "c1", "user_id": "u1", "complexity": "expert"})
+        assert r.status_code == 200 and seen["complexity"] == "expert"
+        r = client.post(url, headers=auth(setup), json={"course_id": "c1", "user_id": "u1"})
+        assert seen["complexity"] == "normal"
+        r = client.post(url, headers=auth(setup), json={"course_id": "c1", "user_id": "u1", "complexity": "genius"})
+        assert r.status_code == 422
+
     @pytest.mark.parametrize("url,extra", TestAiEndpoints.AI_CALLS)
     def test_api_key_requires_course_and_user(self, client, setup, url, extra):
         r = client.post(url, headers=auth(setup), json=extra)

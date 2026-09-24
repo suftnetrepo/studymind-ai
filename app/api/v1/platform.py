@@ -59,7 +59,8 @@ class SectionData(BaseModel):
     lectures: list[LectureData] = []
 
 
-USER_ROLE_PATTERN = "^(student|tutor|admin)$"
+USER_ROLE_PATTERN  = "^(student|tutor|admin)$"
+COMPLEXITY_PATTERN = "^(simple|normal|expert)$"
 
 # course_id / user_id are required with an API key; optional with a session token.
 OptionalId = Optional[str]
@@ -86,7 +87,7 @@ class ChatRequest(BaseModel):
     user_id:    OptionalId = None
     message:    str = Field(..., min_length=1, max_length=4000)
     session_id: Optional[str] = None
-    complexity: str = Field(default="normal", pattern="^(simple|normal|expert)$")
+    complexity: str = Field(default="normal", pattern=COMPLEXITY_PATTERN)
 
 
 class QuizRequest(BaseModel):
@@ -95,6 +96,7 @@ class QuizRequest(BaseModel):
     question_count: int = Field(default=5, ge=1, le=20)
     question_type:  str = Field(default="mcq", pattern="^(mcq|short_answer|true_false)$")
     topic:          Optional[str] = None
+    complexity:     str = Field(default="normal", pattern=COMPLEXITY_PATTERN)
 
 
 class FlashcardsRequest(BaseModel):
@@ -102,12 +104,14 @@ class FlashcardsRequest(BaseModel):
     user_id:   OptionalId = None
     max_cards: int = Field(default=20, ge=5, le=50)
     topic:     Optional[str] = None
+    complexity: str = Field(default="normal", pattern=COMPLEXITY_PATTERN)
 
 
 class SummaryRequest(BaseModel):
     course_id: OptionalId = None
     user_id:   OptionalId = None
     topic:     Optional[str] = None
+    complexity: str = Field(default="normal", pattern=COMPLEXITY_PATTERN)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -754,6 +758,7 @@ async def platform_generate_quiz(
             question_type=req.question_type,
             title=pc.course_title,
             topic=req.topic,
+            complexity=req.complexity,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -777,6 +782,7 @@ async def platform_generate_flashcards(
             module_id=str(pc.module_id),
             max_cards=req.max_cards,
             topic=req.topic,
+            complexity=req.complexity,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -800,6 +806,7 @@ async def platform_summarise(
             module_id=str(pc.module_id),
             scope="module",
             topic=req.topic,
+            complexity=req.complexity,
         )
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
