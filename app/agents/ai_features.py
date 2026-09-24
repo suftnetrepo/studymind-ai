@@ -68,6 +68,23 @@ def _retrieve_context(
     return context, len(nodes_with_score)
 
 
+def _with_topic_focus(prompt: str, topic: str | None) -> str:
+    """
+    Scope a generation prompt to one topic (e.g. a course section or lecture title).
+    Retrieval alone can't do this — small courses return all their chunks for any query —
+    so the model is told explicitly to stay on topic.
+    """
+    if not topic or not topic.strip():
+        return prompt
+    return (
+        f'TOPIC FOCUS: Use ONLY the parts of the content below that are about "{topic.strip()}" '
+        "(for example the section or lecture with that title and its material). Ignore content "
+        "on other topics. If there is little material on this topic, produce fewer items rather "
+        "than drifting off-topic.\n\n"
+        + prompt
+    )
+
+
 def _call_llm_json(prompt: str) -> Any:
     """
     Call GPT-4o and parse the JSON response.
@@ -155,11 +172,11 @@ def generate_quiz(
         "true_false":   "true/false",
     }.get(question_type, "multiple-choice")
 
-    prompt = QUIZ_PROMPT.format(
+    prompt = _with_topic_focus(QUIZ_PROMPT.format(
         count=question_count,
         q_type=q_type_label,
         context=context[:12000],  # stay within context window
-    )
+    ), topic)
 
     questions_raw = _call_llm_json(prompt)
 
@@ -301,10 +318,10 @@ def generate_flashcards(
     if not context:
         raise ValueError("No content found to generate flashcards from. Upload materials first.")
 
-    prompt = FLASHCARD_PROMPT.format(
+    prompt = _with_topic_focus(FLASHCARD_PROMPT.format(
         count=max_cards,
         context=context[:12000],
-    )
+    ), topic)
 
     cards_raw = _call_llm_json(prompt)
 
@@ -393,10 +410,10 @@ def generate_summary(
     if not context:
         raise ValueError("No content found to summarise. Upload materials first.")
 
-    prompt  = SUMMARY_PROMPT.format(
+    prompt  = _with_topic_focus(SUMMARY_PROMPT.format(
         scope=scope_labels.get(scope, scope),
         context=context[:14000],
-    )
+    ), topic)
 
     llm     = get_llm()
     result  = llm.complete(prompt)
