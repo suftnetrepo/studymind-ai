@@ -75,10 +75,10 @@ async def _load_history(session_id: uuid.UUID, db: AsyncSession) -> list[dict]:
     result = await db.execute(
         select(ChatMessage)
         .where(ChatMessage.session_id == session_id)
-        .order_by(ChatMessage.created_at)
+        .order_by(ChatMessage.created_at.desc())  # newest 20, then back to chronological order
         .limit(20)
     )
-    return [{"role": m.role, "content": m.content} for m in result.scalars().all()]
+    return [{"role": m.role, "content": m.content} for m in reversed(result.scalars().all())]
 
 
 async def _resolve_module_scope(
