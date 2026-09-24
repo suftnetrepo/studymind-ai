@@ -580,6 +580,8 @@ async def platform_chat(
         module_id=str(pc.module_id),
         scope_mode="everything",
         complexity=req.complexity,
+        # Broad questions about the course/material should still get an answer from its content
+        fallback_top_k=4,
     )
 
     return {

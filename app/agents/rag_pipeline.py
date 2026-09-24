@@ -249,11 +249,13 @@ class RAGPipeline:
         self,
         scope: SearchScope,
         top_k: int,
+        score_threshold: float | None = None,
     ) -> ScopedHybridRetriever:
         return ScopedHybridRetriever(
             embed_model=self._embed_model,
             scope=scope,
             top_k=top_k,
+            score_threshold=score_threshold,
         )
 
     def query(
@@ -271,9 +273,15 @@ class RAGPipeline:
         semester_label: str | None  = None,
         week_number: int | None     = None,
         complexity: str             = "normal",
+        fallback_top_k: int         = 0,
     ) -> dict:
         """
         Synchronous scoped RAG query.
+
+        fallback_top_k: if no chunk clears the similarity threshold, retry the same scope with no
+        threshold and use the best `fallback_top_k` chunks. Broad questions ("what is this
+        document about?") often match no single chunk closely; within a single-course scope the
+        best chunks are still the right context. 0 (default) disables it.
 
         Returns:
             {
@@ -299,6 +307,12 @@ class RAGPipeline:
         retriever        = self._make_retriever(scope, top_k or settings.top_k_retrieval)
         query_bundle     = QueryBundle(query_str=question)
         nodes_with_score = retriever.retrieve(query_bundle)
+
+        fallback_used = False
+        if not nodes_with_score and fallback_top_k > 0:
+            fallback_retriever = self._make_retriever(scope, fallback_top_k, score_threshold=0.0)
+            nodes_with_score   = fallback_retriever.retrieve(query_bundle)
+            fallback_used      = bool(nodes_with_score)
 
         no_content   = len(nodes_with_score) == 0
         suggestions  = _no_content_suggestions(scope) if no_content else []
@@ -362,6 +376,7 @@ class RAGPipeline:
             citations=len(citations),
             latency_ms=latency_ms,
             no_content=no_content,
+            fallback_used=fallback_used,
         )
 
         return {

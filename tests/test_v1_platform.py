@@ -466,6 +466,7 @@ class TestSessionTokenAuth:
         assert r.status_code == 200
         assert r.json()["answer"] == "A variable stores data."
         assert seen["module_id"] == str(pc.module_id)
+        assert seen["fallback_top_k"] > 0  # broad questions fall back to the course's best chunks
 
     def test_quiz_with_session_token(self, client, db, monkeypatch):
         _, key = make_key(db)
