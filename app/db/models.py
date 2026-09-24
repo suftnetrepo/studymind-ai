@@ -10,7 +10,7 @@ from typing import Optional
 
 from sqlalchemy import (
     Boolean, Date, DateTime, Float, ForeignKey, Integer,
-    String, Text, func, UniqueConstraint,
+    Index, String, Text, func, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -694,4 +694,50 @@ class SessionToken(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class PlatformDocument(Base):
+    """
+    A file uploaded by a platform (e.g. a tutor's PDF) for a course. Stored in Cloudinary and
+    indexed into the course's shared module; `document_id` is the StudyMind Document whose
+    chunks back it (also the Typesense document_id).
+    """
+    __tablename__ = "platform_documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    api_key_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False
+    )
+    platform_course_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    uploaded_by: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)  # platform user id
+    # Cloudinary
+    cloudinary_public_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    cloudinary_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # File info
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    file_format: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # Indexing
+    module_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("modules.id", ondelete="SET NULL"), nullable=True
+    )
+    document_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("documents.id", ondelete="SET NULL"), nullable=True
+    )
+    # pending | indexing | ready | failed
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
+    )
+    indexed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_platform_documents_course", "api_key_id", "platform_course_id"),
     )

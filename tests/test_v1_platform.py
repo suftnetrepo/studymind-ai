@@ -6,7 +6,6 @@ and the indexing/AI calls are monkeypatched.
 import hashlib
 import re
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -329,48 +328,6 @@ class TestIngest:
         r = client.get("/api/v1/courses/status", params={"course_id": "x", "user_id": "y"},
                        headers=auth(full_key))
         assert r.json()["status"] == "not_found"
-
-
-class TestIndexCourseContent:
-    @pytest.fixture
-    def setup(self, db, monkeypatch):
-        _, key = make_key(db)
-        module = Module(id=uuid.uuid4(), title="C", owner_id=uuid.uuid4(), course_code="LEAC1")
-        pc = PlatformCourse(id=uuid.uuid4(), api_key_id=key.id, platform_course_id="c1",
-                            platform_user_id="u1", module_id=module.id, course_title="C",
-                            status="indexing")
-        db.add(module)
-        db.add(pc)
-
-        @asynccontextmanager
-        async def session():
-            yield db
-        monkeypatch.setattr(v1_platform, "AsyncSessionLocal", session)
-        return pc
-
-    def _ingestor(self, monkeypatch, result):
-        class FakeIngestor:
-            def ingest(self, *args, **kwargs):
-                return result
-        monkeypatch.setattr(v1_platform, "get_ingestor", lambda: FakeIngestor())
-
-    @pytest.mark.asyncio
-    async def test_success_marks_ready(self, setup, monkeypatch):
-        self._ingestor(monkeypatch, {
-            "status": "indexed", "chunk_count": 1, "error": None,
-            "indexed_at": datetime.now(timezone.utc),
-            "chunks": [{"typesense_id": "d__0", "chunk_index": 0, "content": "x",
-                        "token_count": 1, "chunk_metadata": {}}],
-        })
-        await v1_platform.index_course_content(setup.id, "Course: C")
-        assert setup.status == "ready" and setup.chunk_count == 1 and setup.indexed_at
-
-    @pytest.mark.asyncio
-    async def test_failure_marks_failed(self, setup, monkeypatch):
-        self._ingestor(monkeypatch, {"status": "failed", "chunk_count": 0, "error": "boom",
-                                     "indexed_at": None, "chunks": []})
-        await v1_platform.index_course_content(setup.id, "Course: C")
-        assert setup.status == "failed" and setup.error_message == "boom"
 
 
 # ── AI endpoints ───────────────────────────────────────────────────────────

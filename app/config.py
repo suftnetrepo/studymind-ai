@@ -93,6 +93,16 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 60
     jwt_refresh_token_expire_days: int = 7
 
+    # ── Cloudinary (platform document storage) ───────────────────────────
+    cloudinary_cloud_name: str = Field(default="")
+    cloudinary_api_key: str = Field(default="")
+    cloudinary_api_secret: str = Field(default="")
+    cloudinary_folder: str = Field(default="studymind/documents")
+
+    @property
+    def cloudinary_configured(self) -> bool:
+        return bool(self.cloudinary_cloud_name and self.cloudinary_api_key and self.cloudinary_api_secret)
+
     # ── App ───────────────────────────────────────────────────────────────
     app_env: str = "development"
     app_log_level: str = "INFO"

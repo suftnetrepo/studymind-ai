@@ -6,20 +6,21 @@ Auth (see app/auth/api_key_auth.py):
 - `Bearer st_...` session token — browser-safe, minted via POST /auth/session and pinned to
   one course + user; course_id/user_id in the request are optional and must match if given.
 
-Each (api_key, platform course, platform user) maps to a PlatformCourse row and a private
-StudyMind Module owned by a synthetic platform user. Course content is indexed into that
-module like any other class material, so chat/quiz/flashcards/summary reuse the
-existing module-scoped pipelines.
+Each (api_key, platform course) has ONE shared StudyMind Module; every platform user of that
+course gets a PlatformCourse row (per-user status) pointing at it. Course content and uploaded
+materials (see documents.py) are indexed into that module as class material, so tutors'
+uploads reach every student and chat/quiz/flashcards/summary reuse the module-scoped pipelines.
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
@@ -32,7 +33,7 @@ from app.db.models import (
 )
 from app.ingestion.ingestor import get_ingestor
 from app.logging_config import get_logger
-from app.retrieval.typesense_client import get_typesense_client, mark_chunks_superseded
+from app.retrieval.typesense_client import delete_document_chunks, get_typesense_client
 
 log = get_logger(__name__)
 
@@ -159,80 +160,168 @@ async def _get_ready_course(
     return pc
 
 
+async def _shared_module(db: AsyncSession, api_key_id: uuid.UUID, course_id: str) -> Optional[Module]:
+    """The course's shared module: the one linked from its earliest PlatformCourse row."""
+    result = await db.execute(
+        select(Module)
+        .join(PlatformCourse, PlatformCourse.module_id == Module.id)
+        .where(
+            PlatformCourse.api_key_id         == api_key_id,
+            PlatformCourse.platform_course_id == course_id,
+        )
+        .order_by(PlatformCourse.created_at)
+        .limit(1)
+    )
+    return result.scalars().first()
+
+
+async def _platform_user(db: AsyncSession, platform: str, user_id: str) -> User:
+    """Synthetic StudyMind user for a platform user (owns modules/documents; never logs in)."""
+    email  = platform_user_email(platform, user_id)
+    result = await db.execute(select(User).where(User.email == email))
+    user   = result.scalar_one_or_none()
+    if not user:
+        user = User(
+            id=uuid.uuid4(),
+            email=email,
+            full_name=f"{platform} user {user_id}"[:255],
+            role="student",
+            password_hash="!",  # unusable
+            is_active=True,
+            is_verified=True,
+        )
+        db.add(user)
+        await db.flush()
+    return user
+
+
 async def get_or_create_module(
     db:          AsyncSession,
     api_key:     ApiKey,
     course_id:   str,
     user_id:     str,
-    title:       str,
+    title:       Optional[str] = None,
     description: Optional[str] = None,
 ) -> tuple[PlatformCourse, Module]:
-    """Find or create the PlatformCourse and its backing StudyMind Module."""
+    """
+    Find or create this user's PlatformCourse and the course's shared Module.
+    `title`/`description` update the course metadata when given (course ingest);
+    callers without course metadata (document upload) pass None to leave it unchanged.
+    """
     platform_course = await _find_platform_course(db, api_key.id, course_id, user_id)
 
+    module = None
     if platform_course and platform_course.module_id:
         module = await db.get(Module, platform_course.module_id)
-        if module:
-            # Keep metadata in sync with the platform
-            platform_course.course_title       = title
-            platform_course.course_description = description
-            module.title       = title
-            module.description = description
-            await db.commit()
-            return platform_course, module
+    if module is None:
+        module = await _shared_module(db, api_key.id, course_id)
 
-    # Synthetic owner user for this platform user
-    email  = platform_user_email(api_key.platform, user_id)
-    result = await db.execute(select(User).where(User.email == email))
-    platform_user = result.scalar_one_or_none()
-
-    if not platform_user:
-        platform_user = User(
+    if module is None:
+        owner  = await _platform_user(db, api_key.platform, user_id)
+        module = Module(
             id=uuid.uuid4(),
-            email=email,
-            full_name=f"{api_key.platform} user {user_id}"[:255],
-            role="student",
-            password_hash="!",  # unusable — platform users never log in directly
-            is_active=True,
-            is_verified=True,
+            title=title or f"Course {course_id}",
+            description=description,
+            course_code=f"{api_key.platform[:3]}{course_id[:6]}".upper(),
+            owner_id=owner.id,
+            access_type="class",
+            status="active",
+            module_metadata={
+                "source":             "platform",
+                "platform":           api_key.platform,
+                "platform_course_id": course_id,
+            },
         )
-        db.add(platform_user)
+        db.add(module)
         await db.flush()
 
-    module = Module(
-        id=uuid.uuid4(),
-        title=title,
-        description=description,
-        course_code=f"{api_key.platform[:3]}{course_id[:6]}".upper(),
-        owner_id=platform_user.id,
-        access_type="personal",
-        status="active",
-        module_metadata={
-            "source":             "platform",
-            "platform":           api_key.platform,
-            "platform_course_id": course_id,
-        },
-    )
-    db.add(module)
-    await db.flush()
+    if title is not None:
+        module.title       = title
+        module.description = description
 
-    if platform_course:
-        platform_course.module_id = module.id
-    else:
+    if platform_course is None:
         platform_course = PlatformCourse(
             id=uuid.uuid4(),
             api_key_id=api_key.id,
             platform_course_id=course_id,
             platform_user_id=user_id,
             module_id=module.id,
-            course_title=title,
+            course_title=title or module.title,
             course_description=description,
             status="pending",
         )
         db.add(platform_course)
+    else:
+        platform_course.module_id = module.id
+        if title is not None:
+            platform_course.course_title       = title
+            platform_course.course_description = description
 
     await db.commit()
     return platform_course, module
+
+
+async def ingest_into_module(
+    db:      AsyncSession,
+    module:  Module,
+    doc:     Document,
+    content: bytes,
+    version: int,
+) -> dict:
+    """
+    Index `content` as `doc` (class material) in `module`: embeds into Typesense, replaces the
+    doc's DocumentChunk rows and updates its status. Typesense chunk ids are
+    `{doc.id}__{idx}`, so re-indexing a doc upserts in place; callers remove leftover chunks of
+    the previous version afterwards. Caller commits.
+    """
+    result = await run_in_threadpool(
+        get_ingestor().ingest,
+        doc.filename,
+        content,
+        str(doc.id),
+        module_id=str(module.id),
+        course_code=module.course_code or "",
+        visibility="class",
+        doc_version=version,
+        lecturer_id=str(module.owner_id),
+    )
+
+    await db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == doc.id))
+    for chunk in result["chunks"]:
+        db.add(DocumentChunk(
+            id=uuid.uuid4(),
+            document_id=doc.id,
+            typesense_id=chunk["typesense_id"],
+            chunk_index=chunk["chunk_index"],
+            content=chunk["content"],
+            token_count=chunk["token_count"],
+            chunk_metadata=chunk["chunk_metadata"],
+        ))
+    doc.status        = result["status"]
+    doc.chunk_count   = result["chunk_count"]
+    doc.error_message = result["error"]
+    doc.indexed_at    = result["indexed_at"]
+    return result
+
+
+def content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+async def _latest_course_content(db: AsyncSession, module_id: uuid.UUID) -> Optional[tuple[ModuleDocument, Document]]:
+    result = await db.execute(
+        select(ModuleDocument, Document)
+        .join(Document, Document.id == ModuleDocument.document_id)
+        .where(
+            ModuleDocument.module_id == module_id,
+            Document.filename == COURSE_CONTENT_FILENAME,
+            ModuleDocument.is_latest == True,  # noqa: E712
+        )
+        .order_by(ModuleDocument.created_at.desc())
+        .limit(1)
+    )
+    row = result.first()
+    return (row[0], row[1]) if row else None
 
 
 async def index_course_content(platform_course_id: uuid.UUID, course_text: str) -> None:
@@ -253,25 +342,8 @@ async def index_course_content(platform_course_id: uuid.UUID, course_text: str) 
             return
 
         try:
-            # Supersede the previous version of the course content, if any
-            prev_result = await db.execute(
-                select(ModuleDocument)
-                .join(Document, Document.id == ModuleDocument.document_id)
-                .where(
-                    ModuleDocument.module_id == module.id,
-                    Document.filename == COURSE_CONTENT_FILENAME,
-                    ModuleDocument.is_latest == True,  # noqa: E712
-                )
-            )
-            prev_md     = prev_result.scalars().first()
-            new_version = 1
-            if prev_md:
-                new_version       = prev_md.version + 1
-                prev_md.is_latest = False
-                await run_in_threadpool(
-                    mark_chunks_superseded,
-                    get_typesense_client(), str(prev_md.document_id), prev_md.version,
-                )
+            prev        = await _latest_course_content(db, module.id)
+            new_version = prev[0].version + 1 if prev else 1
 
             content = course_text.encode("utf-8")
             doc = Document(
@@ -282,50 +354,35 @@ async def index_course_content(platform_course_id: uuid.UUID, course_text: str) 
                 file_size_bytes=len(content),
                 visibility="class",
                 status="pending",
-                doc_metadata={"source": "platform", "platform_course_id": pc.platform_course_id},
+                doc_metadata={
+                    "source":             "platform",
+                    "platform_course_id": pc.platform_course_id,
+                    "content_hash":       content_hash(course_text),
+                },
             )
             db.add(doc)
             await db.commit()
 
-            ingestor = get_ingestor()
-            result   = await run_in_threadpool(
-                ingestor.ingest,
-                COURSE_CONTENT_FILENAME,
-                content,
-                str(doc.id),
-                module_id=str(module.id),
-                course_code=module.course_code or "",
-                visibility="class",
-                doc_version=new_version,
-                lecturer_id=str(module.owner_id),
-            )
-
-            for chunk in result["chunks"]:
-                db.add(DocumentChunk(
-                    id=uuid.uuid4(),
-                    document_id=doc.id,
-                    typesense_id=chunk["typesense_id"],
-                    chunk_index=chunk["chunk_index"],
-                    content=chunk["content"],
-                    token_count=chunk["token_count"],
-                    chunk_metadata=chunk["chunk_metadata"],
-                ))
-            doc.status        = result["status"]
-            doc.chunk_count   = result["chunk_count"]
-            doc.error_message = result["error"]
-            doc.indexed_at    = result["indexed_at"]
-
-            db.add(ModuleDocument(
-                id=uuid.uuid4(),
-                module_id=module.id,
-                document_id=doc.id,
-                uploaded_by=module.owner_id,
-                version=new_version,
-                is_latest=True,
-                visibility="class",
-            ))
+            # Index the new version BEFORE retiring the old one — the module is shared, so
+            # other users keep getting answers from the old content until the new one is live
+            result = await ingest_into_module(db, module, doc, content, new_version)
 
             if result["status"] == "indexed":
+                db.add(ModuleDocument(
+                    id=uuid.uuid4(),
+                    module_id=module.id,
+                    document_id=doc.id,
+                    uploaded_by=module.owner_id,
+                    version=new_version,
+                    is_latest=True,
+                    visibility="class",
+                ))
+                if prev:
+                    prev_md, prev_doc = prev
+                    prev_md.is_latest = False
+                    await run_in_threadpool(
+                        delete_document_chunks, get_typesense_client(), str(prev_doc.id),
+                    )
                 pc.status        = "ready"
                 pc.indexed_at    = datetime.now(timezone.utc)
                 pc.chunk_count   = result["chunk_count"]
@@ -409,10 +466,30 @@ async def ingest_course(
         db, identity.api_key, course_id, user_id, req.title, req.description,
     )
 
+    # The module is shared by the whole course: if another user already indexed identical
+    # content, this user is ready immediately — no re-embedding
+    course_text = build_course_text(req)
+    latest      = await _latest_course_content(db, module.id)
+    if latest:
+        _, latest_doc = latest
+        same = (latest_doc.doc_metadata or {}).get("content_hash") == content_hash(course_text)
+        if same and latest_doc.status == "indexed":
+            platform_course.status        = "ready"
+            platform_course.chunk_count   = latest_doc.chunk_count
+            platform_course.indexed_at    = latest_doc.indexed_at or datetime.now(timezone.utc)
+            platform_course.error_message = None
+            await db.commit()
+            return {
+                "module_id": str(module.id),
+                "course_id": course_id,
+                "status":    "ready",
+                "message":   "Course content already indexed.",
+            }
+
     platform_course.status = "indexing"
     await db.commit()
 
-    background_tasks.add_task(index_course_content, platform_course.id, build_course_text(req))
+    background_tasks.add_task(index_course_content, platform_course.id, course_text)
 
     return {
         "module_id": str(module.id),
