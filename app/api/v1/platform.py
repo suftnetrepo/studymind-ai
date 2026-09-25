@@ -90,6 +90,11 @@ class ChatRequest(BaseModel):
     complexity: str = Field(default="normal", pattern=COMPLEXITY_PATTERN)
 
 
+class NewChatRequest(BaseModel):
+    course_id: OptionalId = None
+    user_id:   OptionalId = None
+
+
 class QuizRequest(BaseModel):
     course_id:      OptionalId = None
     user_id:        OptionalId = None
@@ -695,6 +700,41 @@ async def platform_chat(
         "no_content_found": result["no_content_found"],
         "session_id":       str(session.id),
     }
+
+
+@router.post("/chat/new")
+async def new_chat_session(
+    req:      NewChatRequest,
+    db:       AsyncSession = Depends(get_db),
+    identity: PlatformIdentity = Depends(get_platform_identity),
+):
+    """
+    Start a fresh conversation: closes (is_active=False) the user's current chat session for
+    this course. Messages are kept in the database; the next /chat creates a new session and
+    /chat/history returns nothing until then.
+    """
+    course_id, user_id = identity.scope(req.course_id, req.user_id)
+    owner = (await db.execute(
+        select(User).where(User.email == platform_user_email(identity.api_key.platform, user_id))
+    )).scalar_one_or_none()
+
+    closed = 0
+    if owner:
+        module_ids = await _course_module_ids(db, identity.api_key.id, course_id, user_id)
+        if module_ids:
+            result = await db.execute(
+                select(ChatSession).where(
+                    ChatSession.user_id   == owner.id,
+                    ChatSession.module_id.in_(module_ids),
+                    ChatSession.is_active == True,  # noqa: E712
+                )
+            )
+            for session in result.scalars().all():
+                session.is_active = False
+                closed += 1
+            await db.commit()
+
+    return {"success": True, "closed_sessions": closed, "message": "New chat session started"}
 
 
 @router.get("/chat/history")
