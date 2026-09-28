@@ -99,7 +99,7 @@ def fakes(monkeypatch):
         return {"public_id": public_id, "secure_url": f"https://res.cloudinary.com/demo/raw/upload/{public_id}",
                 "bytes": len(content), "format": filename.rsplit(".", 1)[-1]}
 
-    async def delete(public_id):
+    async def delete(public_id, stored_url=""):
         rec.deletes.append(public_id)
         return True
 

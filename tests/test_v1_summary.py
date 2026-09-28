@@ -79,3 +79,32 @@ class TestSummaryPersistence:
 
     def test_requires_auth(self, client):
         assert client.get("/api/v1/summary", params={"course_id": "c1", "user_id": "u"}).status_code == 401
+
+
+class TestDeleteSummary:
+    def delete(self, client, token, **params):
+        r = client.delete("/api/v1/summary", headers=auth(token), params=params)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def test_delete_topic_only(self, client, db, api_key, course, summaries):
+        summarise(client, api_key, course_id=course, user_id="stu_1")
+        summarise(client, api_key, course_id=course, user_id="stu_1", topic="Loops")
+        assert self.delete(client, api_key, course_id=course, user_id="stu_1", topic="Loops") == {"deleted": 1}
+        assert get_summary(client, api_key, course_id=course, user_id="stu_1", topic="Loops")["summary"] is None
+        assert get_summary(client, api_key, course_id=course, user_id="stu_1", topic="")["summary"] is not None
+
+    def test_delete_all_for_user(self, client, api_key, course, summaries):
+        summarise(client, api_key, course_id=course, user_id="stu_1")
+        summarise(client, api_key, course_id=course, user_id="stu_1", topic="Loops")
+        summarise(client, api_key, course_id=course, user_id="stu_2")
+        assert self.delete(client, api_key, course_id=course, user_id="stu_1") == {"deleted": 2}
+        assert get_summary(client, api_key, course_id=course, user_id="stu_1")["summary"] is None
+        assert get_summary(client, api_key, course_id=course, user_id="stu_2")["summary"] is not None
+
+    def test_delete_with_session_token_is_scoped(self, client, api_key, course, summaries):
+        summarise(client, api_key, course_id=course, user_id="stu_2")
+        token = session_token(client, api_key, course_id=course, user_id="stu_1", role="student")
+        assert self.delete(client, token) == {"deleted": 0}
+        assert client.delete("/api/v1/summary", headers=auth(token), params={"user_id": "stu_2"}).status_code == 401
+        assert get_summary(client, api_key, course_id=course, user_id="stu_2")["summary"] is not None

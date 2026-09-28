@@ -27,6 +27,7 @@ from app.retrieval.typesense_client import (
     delete_document_chunks, get_typesense_client, mark_chunks_superseded,
 )
 from app.storage import cloudinary_client as storage
+from app.storage.cloudinary_client import delivery_type
 
 log = get_logger(__name__)
 
@@ -90,6 +91,15 @@ async def _get_document(
     return pdoc
 
 
+def _viewable_url(d: PlatformDocument) -> Optional[str]:
+    """Signed, expiring link for private files (stored URL for older public ones)."""
+    try:
+        return storage.download_url(d.cloudinary_public_id, d.cloudinary_url)
+    except Exception as e:  # storage not configured / signing failed — don't break the list
+        log.warning("document_download_url_failed", id=str(d.id), error=str(e))
+        return None
+
+
 def _serialize(d: PlatformDocument) -> dict:
     return {
         "id":          str(d.id),
@@ -98,7 +108,7 @@ def _serialize(d: PlatformDocument) -> dict:
         "chunk_count": d.chunk_count,
         "size":        d.file_size_bytes,
         "format":      d.file_format,
-        "url":         d.cloudinary_url,
+        "url":         _viewable_url(d),
         "uploaded_by": d.uploaded_by,
         "indexed_at":  d.indexed_at.isoformat() if d.indexed_at else None,
         "error":       d.error_message,
@@ -234,7 +244,7 @@ async def upload_document(
         db.add(pdoc)
         await db.commit()
     except Exception:
-        await storage.delete_document(stored["public_id"])  # don't orphan the stored file
+        await storage.delete_document(stored["public_id"], stored["secure_url"])  # don't orphan the stored file
         raise
 
     background_tasks.add_task(index_platform_document, pdoc.id, content)
@@ -282,7 +292,7 @@ async def delete_document(
         # (an ORM delete would lazy-load the chunk collection, which async sessions can't do)
         await db.execute(delete(Document).where(Document.id == pdoc.document_id))
 
-    await storage.delete_document(pdoc.cloudinary_public_id)
+    await storage.delete_document(pdoc.cloudinary_public_id, pdoc.cloudinary_url)
     await db.delete(pdoc)
     await db.commit()
     return {"deleted": True, "document_id": str(document_id)}
@@ -313,8 +323,8 @@ async def replace_document(
         raise HTTPException(status_code=502, detail="Failed to upload file to storage")
 
     # Same filename → same public_id, already overwritten; only delete a different old file
-    if stored["public_id"] != pdoc.cloudinary_public_id:
-        await storage.delete_document(pdoc.cloudinary_public_id)
+    if stored["public_id"] != pdoc.cloudinary_public_id or delivery_type(stored["secure_url"]) != delivery_type(pdoc.cloudinary_url):
+        await storage.delete_document(pdoc.cloudinary_public_id, pdoc.cloudinary_url)
 
     ext = Path(filename).suffix.lower().lstrip(".")
     pdoc.cloudinary_public_id = stored["public_id"]

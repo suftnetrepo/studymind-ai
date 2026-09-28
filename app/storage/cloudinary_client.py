@@ -3,16 +3,22 @@ Cloudinary storage for platform-uploaded course documents.
 
 Files are stored as `raw` resources under
     {CLOUDINARY_FOLDER}/{platform}/{course_id}/{document_id}_{filename}
-The document UUID in the public_id keeps same-named uploads from overwriting each other and
-makes URLs unguessable. Note: `upload`-type raw files are publicly readable by URL.
+The document UUID in the public_id keeps same-named uploads from overwriting each other.
+
+New uploads are `private`: their stored URL can't be fetched, so course materials aren't
+public. Viewers get a signed, expiring download link from `download_url()` instead. Files
+uploaded before this change are `upload` type (public) and keep working as-is — the type is
+read from the stored URL (`/raw/private/…` vs `/raw/upload/…`).
 """
 from __future__ import annotations
 
 import io
 import re
+import time
 
 import cloudinary
 import cloudinary.uploader
+import cloudinary.utils
 from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
@@ -34,6 +40,29 @@ def _configure() -> None:
         api_key=settings.cloudinary_api_key,
         api_secret=settings.cloudinary_api_secret,
         secure=True,
+    )
+
+
+PRIVATE = "private"
+DOWNLOAD_LINK_TTL_SECONDS = 3600
+
+
+def delivery_type(stored_url: str) -> str:
+    """'private' for private uploads, 'upload' for older public ones."""
+    return PRIVATE if "/raw/private/" in (stored_url or "") else "upload"
+
+
+def download_url(public_id: str, stored_url: str, ttl: int = DOWNLOAD_LINK_TTL_SECONDS) -> str:
+    """
+    A URL a browser can open. Private files get a signed link that expires after `ttl`
+    seconds; older public files return their stored URL.
+    """
+    if delivery_type(stored_url) != PRIVATE:
+        return stored_url
+    _configure()
+    return cloudinary.utils.private_download_url(
+        public_id, "",                    # raw public_ids already include the extension
+        resource_type="raw", type=PRIVATE, expires_at=int(time.time()) + ttl,
     )
 
 
@@ -65,6 +94,7 @@ async def upload_document(
         io.BytesIO(file_bytes),
         public_id=public_id,
         resource_type="raw",
+        type=PRIVATE,
         overwrite=True,
         filename_override=filename,
     )
@@ -78,12 +108,13 @@ async def upload_document(
     }
 
 
-async def delete_document(public_id: str) -> bool:
+async def delete_document(public_id: str, stored_url: str = "") -> bool:
     """Delete a raw resource. Never raises — storage cleanup must not block DB cleanup."""
     try:
         _configure()
         result = await run_in_threadpool(
-            cloudinary.uploader.destroy, public_id, resource_type="raw", invalidate=True,
+            cloudinary.uploader.destroy, public_id,
+            resource_type="raw", type=delivery_type(stored_url), invalidate=True,
         )
         ok = result.get("result") in ("ok", "not found")
         if not ok:

@@ -897,6 +897,28 @@ def _summary_payload(row: Optional[PlatformSummary]) -> dict:
     }
 
 
+@router.delete("/summary")
+async def delete_summary(
+    course_id: OptionalId = None,
+    user_id:   OptionalId = None,
+    topic:     Optional[str] = Query(default=None, description="Omit to delete all of this user's summaries for the course"),
+    db:        AsyncSession = Depends(get_db),
+    identity:  PlatformIdentity = Depends(get_platform_identity),
+):
+    """Delete the user's saved summary for `topic` ('' = all content), or all of them."""
+    course_id, user_id = identity.scope(course_id, user_id)
+    stmt = delete(PlatformSummary).where(
+        PlatformSummary.api_key_id == identity.api_key.id,
+        PlatformSummary.course_id  == course_id,
+        PlatformSummary.user_id    == user_id,
+    )
+    if topic is not None:
+        stmt = stmt.where(PlatformSummary.topic == topic.strip())
+    result = await db.execute(stmt)
+    await db.commit()
+    return {"deleted": result.rowcount or 0}
+
+
 @router.get("/summary")
 async def get_summary(
     course_id: OptionalId = None,
