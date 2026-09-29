@@ -2,8 +2,12 @@
 v1 Platform documents — tutors upload course materials (PDF/DOCX/TXT/MD) that are stored in
 Cloudinary and indexed into the course's shared module, so every student's AI features use them.
 
+Documents can also be added from a URL (POST /index-url): the file is downloaded and indexed but
+not copied to Cloudinary — the original stays where it is. Such "linked" documents are marked by
+an `external:` public_id so delete/replace never touch the original file.
+
 Auth: API key (server-to-server, trusted) or session token. With a session token, upload /
-replace / delete require user_role tutor or admin; listing is open to any course member.
+index-url / replace / delete require user_role tutor or admin; listing is open to any course member.
 """
 from __future__ import annotations
 
@@ -13,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
@@ -28,6 +33,7 @@ from app.retrieval.typesense_client import (
 )
 from app.storage import cloudinary_client as storage
 from app.storage.cloudinary_client import delivery_type
+from app.storage.url_fetch import EXTENSION_FOR_TYPE, UrlFetchError, fetch_document, filename_from_url
 
 log = get_logger(__name__)
 
@@ -36,6 +42,7 @@ router = APIRouter(prefix="/v1/documents", tags=["Documents"])
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 MAX_FILE_SIZE      = 20 * 1024 * 1024  # 20 MB
 MANAGER_ROLES      = {"tutor", "admin"}
+EXTERNAL_PREFIX    = "external:"   # public_id marker for documents indexed from a URL (not in our storage)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -91,8 +98,15 @@ async def _get_document(
     return pdoc
 
 
+def is_external(d: PlatformDocument) -> bool:
+    """Indexed from a tutor-supplied URL: we don't own the file, so never sign or delete it."""
+    return (d.cloudinary_public_id or "").startswith(EXTERNAL_PREFIX)
+
+
 def _viewable_url(d: PlatformDocument) -> Optional[str]:
-    """Signed, expiring link for private files (stored URL for older public ones)."""
+    """Signed, expiring link for private files (stored URL for older public ones and linked files)."""
+    if is_external(d):
+        return d.cloudinary_url
     try:
         return storage.download_url(d.cloudinary_public_id, d.cloudinary_url)
     except Exception as e:  # storage not configured / signing failed — don't break the list
@@ -292,7 +306,8 @@ async def delete_document(
         # (an ORM delete would lazy-load the chunk collection, which async sessions can't do)
         await db.execute(delete(Document).where(Document.id == pdoc.document_id))
 
-    await storage.delete_document(pdoc.cloudinary_public_id, pdoc.cloudinary_url)
+    if not is_external(pdoc):   # a linked document's file isn't ours to delete
+        await storage.delete_document(pdoc.cloudinary_public_id, pdoc.cloudinary_url)
     await db.delete(pdoc)
     await db.commit()
     return {"deleted": True, "document_id": str(document_id)}
@@ -322,8 +337,12 @@ async def replace_document(
         log.error("document_replace_storage_failed", error=str(e))
         raise HTTPException(status_code=502, detail="Failed to upload file to storage")
 
-    # Same filename → same public_id, already overwritten; only delete a different old file
-    if stored["public_id"] != pdoc.cloudinary_public_id or delivery_type(stored["secure_url"]) != delivery_type(pdoc.cloudinary_url):
+    # Same filename → same public_id, already overwritten; only delete a different old file —
+    # and never a linked document's original (it isn't in our storage)
+    if not is_external(pdoc) and (
+        stored["public_id"] != pdoc.cloudinary_public_id
+        or delivery_type(stored["secure_url"]) != delivery_type(pdoc.cloudinary_url)
+    ):
         await storage.delete_document(pdoc.cloudinary_public_id, pdoc.cloudinary_url)
 
     ext = Path(filename).suffix.lower().lstrip(".")
@@ -347,4 +366,94 @@ async def replace_document(
 
     background_tasks.add_task(index_platform_document, pdoc.id, content)
 
+    return {**_serialize(pdoc), "status": "indexing"}
+
+
+class IndexUrlRequest(BaseModel):
+    course_id: Optional[str] = None          # session tokens take these from the token
+    user_id:   Optional[str] = None
+    url:       str = Field(..., min_length=1, max_length=2048)
+    filename:  Optional[str] = Field(default=None, max_length=255)
+
+
+@router.post("/index-url", status_code=202)
+async def index_from_url(
+    req:              IndexUrlRequest,
+    background_tasks: BackgroundTasks,
+    db:               AsyncSession = Depends(get_db),
+    identity:         PlatformIdentity = Depends(get_platform_identity),
+):
+    """
+    Add a course document from a publicly accessible URL (PDF, DOCX, TXT or MD). The file is
+    downloaded and indexed like an upload, but not copied to Cloudinary: the list links to the
+    original, and deleting the document never deletes the original file.
+    """
+    _require_manager(identity)
+    course_id, user_id = identity.scope(req.course_id, req.user_id)
+    url = req.url.strip()
+    if not url.lower().startswith("https://"):
+        raise HTTPException(status_code=400, detail="URL must start with https://")
+
+    # Same URL already added to this course (and not failed)? Don't index it twice.
+    existing = (await db.execute(
+        select(PlatformDocument).where(
+            PlatformDocument.api_key_id         == identity.api_key.id,
+            PlatformDocument.platform_course_id == course_id,
+            PlatformDocument.cloudinary_url     == url,
+            PlatformDocument.status.in_(("pending", "indexing", "ready")),
+        ).limit(1)
+    )).scalar_one_or_none()
+    if existing:
+        return {**_serialize(existing), "already_indexed": True, "message": "This URL has already been added"}
+
+    # Type from the filename/URL when it has an extension; otherwise from what the server says
+    filename = Path(req.filename or filename_from_url(url)).name.strip()
+    ext      = Path(filename).suffix.lower()
+    if ext and ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=400, detail=f"File type {ext} not supported. Allowed: PDF, DOCX, TXT, MD")
+
+    try:
+        fetched = await fetch_document(url, MAX_FILE_SIZE)
+    except UrlFetchError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if not ext:
+        ext = EXTENSION_FOR_TYPE.get(fetched.content_type, "")
+        if not ext:
+            raise HTTPException(status_code=400, detail="Couldn't tell the file type. Link directly to a PDF, DOCX, TXT or MD file.")
+        filename = f"{filename or 'document'}{ext}"
+
+    _, module = await get_or_create_module(db, identity.api_key, course_id, user_id)
+
+    fmt = ext.lstrip(".")
+    doc = Document(
+        id=uuid.uuid4(),
+        owner_id=module.owner_id,
+        filename=filename,
+        file_type=fmt,
+        file_size_bytes=len(fetched.content),
+        visibility="class",
+        status="pending",
+        doc_metadata={"source": "platform_url", "platform_course_id": course_id, "url": url},
+    )
+    db.add(doc)
+    pdoc = PlatformDocument(
+        id=uuid.uuid4(),
+        api_key_id=identity.api_key.id,
+        platform_course_id=course_id,
+        uploaded_by=user_id,
+        cloudinary_public_id=f"{EXTERNAL_PREFIX}{url}"[:512],
+        cloudinary_url=url,
+        filename=filename[:512],
+        file_size_bytes=len(fetched.content),
+        file_format=fmt,
+        module_id=module.id,
+        document_id=doc.id,
+        status="pending",
+    )
+    db.add(pdoc)
+    await db.commit()
+    log.info("platform_document_from_url", id=str(pdoc.id), course_id=course_id, bytes=len(fetched.content))
+
+    background_tasks.add_task(index_platform_document, pdoc.id, fetched.content)
     return {**_serialize(pdoc), "status": "indexing"}
