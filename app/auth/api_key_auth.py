@@ -79,6 +79,25 @@ async def get_api_key(
     FastAPI dependency — validates the Bearer token as a platform API key.
     Use instead of require_auth for /api/v1 platform endpoints.
     """
+    return await _authenticate_api_key(credentials, db, record_usage=True)
+
+
+async def get_api_key_uncounted(
+    credentials: HTTPAuthorizationCredentials | None = Security(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> ApiKey:
+    """
+    Same validation as get_api_key, but doesn't bump request_count/last_used_at —
+    for endpoints that *report* usage, so polling them doesn't inflate what they report.
+    """
+    return await _authenticate_api_key(credentials, db, record_usage=False)
+
+
+async def _authenticate_api_key(
+    credentials: HTTPAuthorizationCredentials | None,
+    db: AsyncSession,
+    record_usage: bool,
+) -> ApiKey:
     if not credentials or not credentials.credentials:
         raise _unauthorized("API key required")
 
@@ -100,7 +119,8 @@ async def get_api_key(
     if _key_expired(api_key, now):
         raise _unauthorized("API key expired")
 
-    await _record_usage(db, api_key, now)
+    if record_usage:
+        await _record_usage(db, api_key, now)
     return api_key
 
 

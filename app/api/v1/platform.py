@@ -21,12 +21,12 @@ from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, distinct, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
 
 from app.auth.api_key_auth import (
-    PlatformIdentity, generate_session_token, get_api_key, get_platform_identity,
+    PlatformIdentity, generate_session_token, get_api_key, get_api_key_uncounted, get_platform_identity,
 )
 from app.db.engine import AsyncSessionLocal, get_db
 from app.db.models import (
@@ -941,3 +941,116 @@ async def get_summary(
         query = query.where(PlatformSummary.topic == topic.strip())
     result = await db.execute(query.order_by(PlatformSummary.created_at.desc()).limit(1))
     return _summary_payload(result.scalars().first())
+
+
+# ── Usage (self-service) ───────────────────────────────────────────────────
+
+# Platform course ids used for smoke tests/demos — excluded from usage stats
+TEST_COURSE_IDS = frozenset({"test_course_001", "test_001", "demo_python_101", "probe_course"})
+
+
+def _iso(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+@router.get("/usage")
+async def get_platform_usage(
+    db:      AsyncSession = Depends(get_db),
+    api_key: ApiKey = Depends(get_api_key_uncounted),  # reporting usage mustn't add to it
+):
+    """
+    Usage stats for the calling platform API key (no admin token needed).
+    Called by the platform (e.g. Edquis) to show AI usage in its own analytics.
+
+    A course is AI-ready through ingested course content (PlatformCourse — one row per
+    course *and user*, all sharing the course's module) or through indexed uploads
+    (PlatformDocument), so both are merged per platform_course_id. Chat is matched on the
+    distinct set of those modules; joining row-by-row would multiply counts per user.
+    """
+    not_test_course = PlatformCourse.platform_course_id.not_in(TEST_COURSE_IDS)
+    not_test_doc    = PlatformDocument.platform_course_id.not_in(TEST_COURSE_IDS)
+
+    content_rows = (await db.execute(
+        select(
+            PlatformCourse.platform_course_id.label("course_id"),
+            func.max(PlatformCourse.course_title).label("title"),
+            func.bool_or((PlatformCourse.status == "ready") & PlatformCourse.module_id.is_not(None)).label("ready"),
+            func.bool_or(PlatformCourse.status.in_(("pending", "indexing"))).label("pending"),
+            func.max(PlatformCourse.chunk_count).label("chunks"),
+            func.max(PlatformCourse.indexed_at).label("indexed_at"),
+        )
+        .where(PlatformCourse.api_key_id == api_key.id, not_test_course)
+        .group_by(PlatformCourse.platform_course_id)
+    )).all()
+
+    doc_rows = (await db.execute(
+        select(
+            PlatformDocument.platform_course_id.label("course_id"),
+            func.count(PlatformDocument.id).filter(PlatformDocument.status == "ready").label("ready_docs"),
+            func.bool_or(PlatformDocument.status.in_(("pending", "indexing"))).label("pending"),
+            func.coalesce(
+                func.sum(PlatformDocument.chunk_count).filter(PlatformDocument.status == "ready"), 0
+            ).label("chunks"),
+            func.max(PlatformDocument.indexed_at).label("indexed_at"),
+        )
+        .where(PlatformDocument.api_key_id == api_key.id, not_test_doc)
+        .group_by(PlatformDocument.platform_course_id)
+    )).all()
+
+    merged: dict[str, dict] = {}
+    for r in content_rows:
+        merged[r.course_id] = {"title": r.title, "ready": bool(r.ready), "pending": bool(r.pending),
+                               "chunks": r.chunks or 0, "indexed_at": r.indexed_at}
+    for r in doc_rows:
+        m = merged.setdefault(r.course_id, {"title": None, "ready": False, "pending": False,
+                                            "chunks": 0, "indexed_at": None})
+        m["ready"]      = m["ready"] or r.ready_docs > 0
+        m["pending"]    = m["pending"] or bool(r.pending)
+        m["chunks"]    += int(r.chunks)
+        m["indexed_at"] = max(filter(None, (m["indexed_at"], r.indexed_at)), default=None)
+
+    courses = sorted(
+        ({
+            "course_id":   course_id,
+            "title":       m["title"],   # None when the course only has uploads
+            "status":      "ready" if m["ready"] else "pending" if m["pending"] else "failed",
+            "chunk_count": m["chunks"],
+            "indexed_at":  _iso(m["indexed_at"]),
+        } for course_id, m in merged.items()),
+        key=lambda c: c["indexed_at"] or "",
+        reverse=True,
+    )
+
+    documents_uploaded = sum(r.ready_docs for r in doc_rows)
+    document_chunks    = sum(int(r.chunks) for r in doc_rows)
+
+    # Modules of this key's (non-test) courses, from either source
+    module_ids = (
+        select(PlatformCourse.module_id)
+        .where(PlatformCourse.api_key_id == api_key.id, PlatformCourse.module_id.is_not(None), not_test_course)
+        .union(
+            select(PlatformDocument.module_id)
+            .where(PlatformDocument.api_key_id == api_key.id, PlatformDocument.module_id.is_not(None), not_test_doc)
+        )
+        .scalar_subquery()
+    )
+    total_sessions = await db.scalar(
+        select(func.count(ChatSession.id)).where(ChatSession.module_id.in_(module_ids))
+    ) or 0
+    total_questions = await db.scalar(
+        select(func.count(ChatMessage.id))
+        .join(ChatSession, ChatMessage.session_id == ChatSession.id)
+        .where(ChatSession.module_id.in_(module_ids), ChatMessage.role == "user")
+    ) or 0
+
+    return {
+        "platform":            api_key.platform,
+        "total_requests":      api_key.request_count,
+        "last_used_at":        _iso(api_key.last_used_at),
+        "courses_indexed":     sum(1 for c in courses if c["status"] == "ready"),
+        "documents_uploaded":  documents_uploaded,
+        "total_chunks":        document_chunks,
+        "total_chat_sessions": total_sessions,
+        "total_questions":     total_questions,
+        "courses":             courses,
+    }
