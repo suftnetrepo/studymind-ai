@@ -76,17 +76,34 @@ class TestUsage:
         assert u["total_chat_sessions"] == 2
         assert u["total_questions"] == 2
 
-    def test_filters_out_test_courses(self, client, api_key, fakes, pipeline):
+    def test_filters_out_test_courses(self, client, db, api_key, fakes, pipeline):
         upload(client, api_key, course_id="c1", user_id="tutor_1")
-        upload(client, api_key, course_id="test_course_001", user_id="tutor_1")
-        upload(client, api_key, course_id="probe_course", user_id="tutor_1")
-        chat(client, api_key, "Test question", course_id="test_course_001", user_id="stu_1")
+        for cid in ("test_course_001", "test_anything", "demo_python_101", "probe_course", "react_test_1790199591"):
+            upload(client, api_key, course_id=cid, user_id="tutor_1")
+        chat(client, api_key, "Test question", course_id="test_anything", user_id="stu_1")
+        chat(client, api_key, "Demo question", course_id="react_test_1790199591", user_id="stu_1")
+
+        # A real-looking id whose *title* marks it as a test course
+        r = client.post("/api/v1/courses/ingest", headers=auth(api_key), json={
+            "course_id": "5e1c0d2a-0000-4000-8000-000000000001", "user_id": "stu_1",
+            "title": "ZZ Free test course", "sections": []})
+        assert r.status_code == 202, r.text
+        upload(client, api_key, course_id="5e1c0d2a-0000-4000-8000-000000000001", user_id="tutor_1")
 
         u = usage(client, api_key)
         assert [c["course_id"] for c in u["courses"]] == ["c1"]
         assert u["courses_indexed"] == 1
+        # Test courses are excluded from the counts too, not just the list
         assert u["documents_uploaded"] == 1
-        assert u["total_questions"] == 0
+        assert u["total_chat_sessions"] == 0 and u["total_questions"] == 0
+
+    def test_similar_names_are_not_filtered(self, client, api_key, fakes):
+        """Only the prefixes match — a course merely containing 'test' stays."""
+        for cid in ("latest_course", "contest_101", "demonstration"):
+            upload(client, api_key, course_id=cid, user_id="tutor_1")
+        assert sorted(c["course_id"] for c in usage(client, api_key)["courses"]) == [
+            "contest_101", "demonstration", "latest_course",
+        ]
 
     def test_only_reports_the_callers_own_usage(self, client, db, api_key, fakes, pipeline):
         upload(client, api_key, course_id="c1", user_id="tutor_1")

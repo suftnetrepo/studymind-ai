@@ -945,8 +945,18 @@ async def get_summary(
 
 # ── Usage (self-service) ───────────────────────────────────────────────────
 
-# Platform course ids used for smoke tests/demos — excluded from usage stats
-TEST_COURSE_IDS = frozenset({"test_course_001", "test_001", "demo_python_101", "probe_course"})
+# Smoke-test/demo courses — excluded from usage stats (list and every count)
+TEST_COURSE_ID_PREFIXES = ("test_", "demo_", "probe_", "react_test_")
+TEST_COURSE_IDS         = frozenset({"test_course_001", "test_001"})
+TEST_COURSE_TITLE_PREFIX = "ZZ "
+
+
+def _is_test_course(course_id: str, title: Optional[str]) -> bool:
+    return (
+        course_id.startswith(TEST_COURSE_ID_PREFIXES)
+        or course_id in TEST_COURSE_IDS
+        or (title or "").startswith(TEST_COURSE_TITLE_PREFIX)
+    )
 
 
 def _iso(value: Optional[datetime]) -> Optional[str]:
@@ -967,9 +977,6 @@ async def get_platform_usage(
     (PlatformDocument), so both are merged per platform_course_id. Chat is matched on the
     distinct set of those modules; joining row-by-row would multiply counts per user.
     """
-    not_test_course = PlatformCourse.platform_course_id.not_in(TEST_COURSE_IDS)
-    not_test_doc    = PlatformDocument.platform_course_id.not_in(TEST_COURSE_IDS)
-
     content_rows = (await db.execute(
         select(
             PlatformCourse.platform_course_id.label("course_id"),
@@ -979,7 +986,7 @@ async def get_platform_usage(
             func.max(PlatformCourse.chunk_count).label("chunks"),
             func.max(PlatformCourse.indexed_at).label("indexed_at"),
         )
-        .where(PlatformCourse.api_key_id == api_key.id, not_test_course)
+        .where(PlatformCourse.api_key_id == api_key.id)
         .group_by(PlatformCourse.platform_course_id)
     )).all()
 
@@ -993,7 +1000,7 @@ async def get_platform_usage(
             ).label("chunks"),
             func.max(PlatformDocument.indexed_at).label("indexed_at"),
         )
-        .where(PlatformDocument.api_key_id == api_key.id, not_test_doc)
+        .where(PlatformDocument.api_key_id == api_key.id)
         .group_by(PlatformDocument.platform_course_id)
     )).all()
 
@@ -1009,6 +1016,12 @@ async def get_platform_usage(
         m["chunks"]    += int(r.chunks)
         m["indexed_at"] = max(filter(None, (m["indexed_at"], r.indexed_at)), default=None)
 
+    # Test courses are matched on id or title (title needs the merge above), then dropped
+    # from the list AND from the document/chat counts below
+    excluded = {cid for cid, m in merged.items() if _is_test_course(cid, m["title"])}
+    for cid in excluded:
+        del merged[cid]
+
     courses = sorted(
         ({
             "course_id":   course_id,
@@ -1021,16 +1034,19 @@ async def get_platform_usage(
         reverse=True,
     )
 
-    documents_uploaded = sum(r.ready_docs for r in doc_rows)
-    document_chunks    = sum(int(r.chunks) for r in doc_rows)
+    real_doc_rows      = [r for r in doc_rows if r.course_id not in excluded]
+    documents_uploaded = sum(r.ready_docs for r in real_doc_rows)
+    document_chunks    = sum(int(r.chunks) for r in real_doc_rows)
 
     # Modules of this key's (non-test) courses, from either source
     module_ids = (
         select(PlatformCourse.module_id)
-        .where(PlatformCourse.api_key_id == api_key.id, PlatformCourse.module_id.is_not(None), not_test_course)
+        .where(PlatformCourse.api_key_id == api_key.id, PlatformCourse.module_id.is_not(None),
+               PlatformCourse.platform_course_id.not_in(excluded))
         .union(
             select(PlatformDocument.module_id)
-            .where(PlatformDocument.api_key_id == api_key.id, PlatformDocument.module_id.is_not(None), not_test_doc)
+            .where(PlatformDocument.api_key_id == api_key.id, PlatformDocument.module_id.is_not(None),
+                   PlatformDocument.platform_course_id.not_in(excluded))
         )
         .scalar_subquery()
     )
