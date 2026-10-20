@@ -24,7 +24,6 @@ from app.api.activity import router as activity_router
 from app.api.v1 import admin as v1_admin
 from app.api.v1 import documents as v1_documents
 from app.api.v1 import platform as v1_platform
-from app.api.quanta import router as quanta_router
 from app.db.engine import create_all_tables
 from app.logging_config import configure_logging, get_logger
 from app.retrieval.typesense_client import ensure_collection, get_typesense_client
@@ -97,8 +96,6 @@ def create_app() -> FastAPI:
     # NOTE: the legacy unauthenticated /api/documents router is intentionally not mounted; all
     # document access goes through the authenticated /api/modules/{id}/documents endpoints.
     app.include_router(health_router)
-    # Quanta — STEM voice tutor endpoints
-    app.include_router(quanta_router)
 
     return app
 
