@@ -113,6 +113,23 @@ class Settings(BaseSettings):
     top_k_retrieval: int = 6
     similarity_threshold: float = 0.25
 
+    # ── Usage policies (opt-in quotas for pass sessions; see app/services/usage_policy.py) ──
+    # Only API keys whose `platform` is listed may attach a usage policy to a session token.
+    # Sessions without a policy are never limited.
+    usage_policy_platforms: str = "learnify"
+    usage_policy_timezone: str = "Europe/London"
+    # learnify_free_course_pass — frozen onto each policy when it is created
+    pass_daily_chat: int = 60
+    pass_daily_quiz: int = 5
+    pass_daily_flashcards: int = 5
+    pass_daily_summary: int = 3
+    pass_budget_usd: float = 4.50
+    pass_max_days: int = 30
+
+    @property
+    def usage_policy_platform_set(self) -> set[str]:
+        return {p.strip() for p in self.usage_policy_platforms.split(",") if p.strip()}
+
     @field_validator("app_env")
     @classmethod
     def validate_env(cls, v: str) -> str:

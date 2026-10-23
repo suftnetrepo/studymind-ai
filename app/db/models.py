@@ -9,7 +9,7 @@ from datetime import date, datetime
 from typing import Optional
 
 from sqlalchemy import (
-    Boolean, Date, DateTime, Float, ForeignKey, Integer,
+    BigInteger, Boolean, Date, DateTime, Float, ForeignKey, Integer,
     Index, String, Text, func, UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -766,3 +766,88 @@ class PlatformSummary(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+# ── Usage policies (opt-in quotas for platform pass sessions) ───────────────────
+# New tables only: create_all() adds them on startup and no existing table changes.
+# Sessions without a policy are never limited. Money is stored in integer micro-USD.
+
+class UsagePolicy(Base):
+    """A platform-issued pass (e.g. a Learnify AI Tutor Pass) bound to one platform user."""
+    __tablename__ = "usage_policies"
+    __table_args__ = (
+        UniqueConstraint("api_key_id", "external_ref", name="uq_usage_policy_ref"),
+        Index("ix_usage_policies_user", "api_key_id", "platform_user_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    api_key_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("api_keys.id", ondelete="CASCADE"), nullable=False
+    )
+    platform: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    external_ref: Mapped[str] = mapped_column(String(255), nullable=False)     # e.g. Learnify pass id
+    platform_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    daily_limits: Mapped[dict] = mapped_column(JSONB, nullable=False)          # {"chat": 60, ...}
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False)
+    budget_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    spent_micro_usd: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    reserved_micro_usd: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoke_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class SessionTokenPolicy(Base):
+    """Links a session token to the usage policy it was minted under (session_tokens is unchanged)."""
+    __tablename__ = "session_token_policies"
+
+    session_token_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("session_tokens.id", ondelete="CASCADE"), primary_key=True
+    )
+    policy_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("usage_policies.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class UsageCounter(Base):
+    """Per policy, per local day, per feature: how many requests were reserved."""
+    __tablename__ = "usage_counters"
+
+    policy_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("usage_policies.id", ondelete="CASCADE"), primary_key=True
+    )
+    usage_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    feature: Mapped[str] = mapped_column(String(32), primary_key=True)
+    used: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class UsageEvent(Base):
+    """One guarded AI request: reserved → committed (actual cost) or released (failed)."""
+    __tablename__ = "usage_events"
+    __table_args__ = (Index("ix_usage_events_policy_status", "policy_id", "status"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    policy_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("usage_policies.id", ondelete="CASCADE"), nullable=False
+    )
+    feature: Mapped[str] = mapped_column(String(32), nullable=False)
+    course_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    usage_date: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)   # reserved | committed | released
+    reserved_micro_usd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cost_micro_usd: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    input_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

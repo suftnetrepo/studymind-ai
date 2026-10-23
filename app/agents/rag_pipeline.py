@@ -17,6 +17,7 @@ from typing import Any
 from llama_index.core import PromptTemplate
 from llama_index.core.schema import QueryBundle
 
+from app.agents import llm_usage
 from app.agents.llm_factory import get_embed_model, get_llm
 from app.config import get_settings
 from app.db.schemas import ScopeIndicator, SourceCitation
@@ -347,6 +348,7 @@ class RAGPipeline:
         )
 
         response    = self._llm.complete(prompt)
+        llm_usage.report(response)   # no-op unless a usage policy is enforcing
         answer_text = str(response)
         latency_ms  = int((time.perf_counter() - t0) * 1000)
 

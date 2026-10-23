@@ -12,7 +12,7 @@ import hashlib
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.engine import get_db
 from app.db.models import ApiKey, SessionToken
+from app.usage.policy import load_policy_for_token
 
 KEY_PREFIX           = "sm_live_"
 SESSION_TOKEN_PREFIX = "st_"
@@ -132,6 +133,8 @@ class PlatformIdentity:
     course_id: Optional[str] = None
     user_id:   Optional[str] = None
     user_role: Optional[str] = None
+    # Usage policy the session token was minted under (pass sessions only); None = unrestricted
+    policy:    Optional[Any] = None
 
     def scope(self, course_id: Optional[str], user_id: Optional[str]) -> tuple[str, str]:
         """
@@ -181,6 +184,9 @@ async def get_platform_identity(
     if not api_key or not api_key.is_active or _key_expired(api_key, now):
         raise _unauthorized("Session token is no longer valid")
 
+    # Pass sessions: bound to their policy — invalid/expired/revoked policies reject the token
+    policy = await load_policy_for_token(db, st)
+
     await _record_usage(db, api_key, now)
     return PlatformIdentity(
         api_key=api_key,
@@ -188,4 +194,5 @@ async def get_platform_identity(
         course_id=st.course_id,
         user_id=st.user_id,
         user_role=st.user_role,
+        policy=policy,
     )

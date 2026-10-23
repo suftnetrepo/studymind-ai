@@ -2,6 +2,7 @@
 Async SQLAlchemy engine and session factory.
 Uses asyncpg driver for high-throughput async I/O.
 """
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 from app.config import get_settings
@@ -49,9 +50,18 @@ async def get_db() -> AsyncSession:
             raise
 
 
+# Arbitrary constant identifying the schema-creation advisory lock
+_CREATE_ALL_LOCK_KEY = 7_324_119_001
+
+
 async def create_all_tables() -> None:
-    """Create all tables defined via ORM models."""
+    """
+    Create all tables defined via ORM models (missing tables only — existing tables are never
+    altered). Every uvicorn worker runs this at startup; the advisory lock serialises them so two
+    workers can't race to create the same new table (one would fail its startup).
+    """
     async with engine.begin() as conn:
+        await conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _CREATE_ALL_LOCK_KEY})
         await conn.run_sync(Base.metadata.create_all)
 
 
