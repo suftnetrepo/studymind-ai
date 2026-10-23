@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.agents.llm_factory import configure_llama_settings
 from app.api.auth import router as auth_router
@@ -24,9 +25,11 @@ from app.api.activity import router as activity_router
 from app.api.v1 import admin as v1_admin
 from app.api.v1 import documents as v1_documents
 from app.api.v1 import platform as v1_platform
+from app.api.v1 import usage_policy as v1_usage_policy
 from app.db.engine import create_all_tables
 from app.logging_config import configure_logging, get_logger
 from app.retrieval.typesense_client import ensure_collection, get_typesense_client
+from app.usage.policy import UsagePolicyError
 
 log = get_logger(__name__)
 
@@ -91,6 +94,13 @@ def create_app() -> FastAPI:
     app.include_router(activity_router)
     # v1 platform integrations (API-key auth) + key management (admin JWT)
     app.include_router(v1_platform.router, prefix="/api")
+    app.include_router(v1_usage_policy.router, prefix="/api")
+
+    @app.exception_handler(UsagePolicyError)
+    async def _usage_policy_error(_request, exc: UsagePolicyError):
+        # `detail` stays a plain string (shown by SDK clients); `code` is machine-readable
+        return JSONResponse(status_code=exc.status_code, headers=exc.headers,
+                            content={"detail": exc.message, "code": exc.code, **exc.extra})
     app.include_router(v1_admin.router, prefix="/api")
     app.include_router(v1_documents.router, prefix="/api")
     # NOTE: the legacy unauthenticated /api/documents router is intentionally not mounted; all

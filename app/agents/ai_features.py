@@ -12,6 +12,7 @@ from typing import Any
 
 from llama_index.core.schema import QueryBundle
 
+from app.agents import llm_usage
 from app.agents.llm_factory import get_embed_model, get_llm
 from app.config import get_settings
 from app.logging_config import get_logger
@@ -121,6 +122,7 @@ def _call_llm_json(prompt: str) -> Any:
     """
     llm      = get_llm()
     response = llm.complete(prompt)
+    llm_usage.report(response)   # no-op unless a usage policy is enforcing
     raw      = str(response).strip()
 
     # Strip markdown code fences
@@ -452,6 +454,7 @@ def generate_summary(
 
     llm     = get_llm()
     result  = llm.complete(prompt)
+    llm_usage.report(result)   # no-op unless a usage policy is enforcing
     summary = str(result).strip()
 
     log.info(

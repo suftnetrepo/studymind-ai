@@ -17,10 +17,10 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, distinct, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.concurrency import run_in_threadpool
@@ -31,11 +31,12 @@ from app.auth.api_key_auth import (
 from app.db.engine import AsyncSessionLocal, get_db
 from app.db.models import (
     ApiKey, ChatMessage, ChatSession, Document, DocumentChunk, Module, ModuleDocument, PlatformCourse,
-    PlatformDocument, PlatformSummary, SessionToken, User,
+    PlatformDocument, PlatformSummary, SessionToken, SessionTokenPolicy, User,
 )
 from app.ingestion.ingestor import get_ingestor
 from app.logging_config import get_logger
 from app.retrieval.typesense_client import delete_document_chunks, get_typesense_client
+from app.usage import policy as usage
 
 log = get_logger(__name__)
 
@@ -66,11 +67,24 @@ COMPLEXITY_PATTERN = "^(simple|normal|expert)$"
 OptionalId = Optional[str]
 
 
+class UsagePolicyRequest(BaseModel):
+    """
+    Optional, server-to-server only: marks the session as a usage-limited pass session.
+    Limits come from StudyMind's configuration — clients cannot supply them (extra fields rejected).
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    type:       Literal["learnify_free_course_pass"]
+    pass_id:    str = Field(..., min_length=1, max_length=255)
+    expires_at: datetime
+
+
 class CreateSessionRequest(BaseModel):
     course_id:  str = Field(..., min_length=1, max_length=255)
     user_id:    str = Field(..., min_length=1, max_length=255)
     user_role:  str = Field(default="student", pattern=USER_ROLE_PATTERN)
     expires_in: int = Field(default=3600, ge=300, le=86400, description="Seconds (5 min – 24 h)")
+    usage_policy: Optional[UsagePolicyRequest] = None   # absent = ordinary, unrestricted session
 
 
 class IngestCourseRequest(BaseModel):
@@ -557,11 +571,21 @@ async def create_session(
     """
     pc = await _find_platform_course(db, api_key.id, req.course_id, req.user_id)
 
+    policy = None
+    if req.usage_policy is not None:   # invalid policies raise — no token is minted
+        policy = await usage.attach_policy(
+            db, api_key, policy_type=req.usage_policy.type, external_ref=req.usage_policy.pass_id,
+            expires_at=req.usage_policy.expires_at, user_id=req.user_id, user_role=req.user_role,
+        )
+
     full_token, token_hash = generate_session_token()
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=req.expires_in)
+    if policy is not None and policy.expires_at < expires_at:
+        expires_at = policy.expires_at   # a pass token never outlives its pass
 
+    token_id = uuid.uuid4()
     db.add(SessionToken(
-        id=uuid.uuid4(),
+        id=token_id,
         token_hash=token_hash,
         api_key_id=api_key.id,
         course_id=req.course_id,
@@ -570,9 +594,12 @@ async def create_session(
         module_id=pc.module_id if pc else None,
         expires_at=expires_at,
     ))
+    if policy is not None:
+        await db.flush()
+        db.add(SessionTokenPolicy(session_token_id=token_id, policy_id=policy.id))
     await db.commit()
 
-    return {
+    response = {
         "session_token": full_token,
         "expires_in":    req.expires_in,
         "expires_at":    expires_at.isoformat(),
@@ -580,6 +607,10 @@ async def create_session(
         "user_id":       req.user_id,
         "course_status": pc.status if pc else "not_found",
     }
+    if policy is not None:   # additive: only pass sessions get these fields
+        response["expires_in"]   = max(0, int((expires_at - datetime.now(timezone.utc)).total_seconds()))
+        response["usage_policy"] = await usage.policy_status(db, policy, include_budget=False)
+    return response
 
 
 @router.post("/courses/ingest", status_code=202)
@@ -665,23 +696,25 @@ async def platform_chat(
     per course + user (see /chat/history), and recent turns are sent as context.
     """
     course  = await _get_ready_course(db, identity, req.course_id, req.user_id)
-    session = await _get_or_create_chat_session(db, identity, course)
-    history = await _recent_turns(db, session.id, CHAT_HISTORY_TURNS)
+    # Pass sessions only: reserves today's allowance first; no-op for every other session
+    async with usage.guard(db, identity, "chat", course.platform_course_id):
+        session = await _get_or_create_chat_session(db, identity, course)
+        history = await _recent_turns(db, session.id, CHAT_HISTORY_TURNS)
 
-    db.add(ChatMessage(session_id=session.id, role="user", content=req.message))
-    await db.commit()  # save the question (and release locks) before the slow LLM call
+        db.add(ChatMessage(session_id=session.id, role="user", content=req.message))
+        await db.commit()  # save the question (and release locks) before the slow LLM call
 
-    from app.agents.rag_pipeline import get_pipeline
-    result = await run_in_threadpool(
-        get_pipeline().query,
-        question=req.message,
-        history=history,
-        module_id=str(course.module_id),
-        scope_mode="everything",
-        complexity=req.complexity,
-        # Broad questions about the course/material should still get an answer from its content
-        fallback_top_k=4,
-    )
+        from app.agents.rag_pipeline import get_pipeline
+        result = await run_in_threadpool(
+            get_pipeline().query,
+            question=req.message,
+            history=history,
+            module_id=str(course.module_id),
+            scope_mode="everything",
+            complexity=req.complexity,
+            # Broad questions about the course/material should still get an answer from its content
+            fallback_top_k=4,
+        )
 
     db.add(ChatMessage(
         session_id=session.id,
@@ -790,18 +823,19 @@ async def platform_generate_quiz(
     pc = await _get_ready_course(db, identity, req.course_id, req.user_id)
 
     from app.agents.ai_features import generate_quiz
-    try:
-        questions = await run_in_threadpool(
-            generate_quiz,
-            module_id=str(pc.module_id),
-            question_count=req.question_count,
-            question_type=req.question_type,
-            title=pc.course_title,
-            topic=req.topic,
-            complexity=req.complexity,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    async with usage.guard(db, identity, "quiz", pc.platform_course_id, topic=req.topic):
+        try:
+            questions = await run_in_threadpool(
+                generate_quiz,
+                module_id=str(pc.module_id),
+                question_count=req.question_count,
+                question_type=req.question_type,
+                title=pc.course_title,
+                topic=req.topic,
+                complexity=req.complexity,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     return {"course_id": pc.platform_course_id, "questions": questions, "count": len(questions)}
 
@@ -816,16 +850,17 @@ async def platform_generate_flashcards(
     pc = await _get_ready_course(db, identity, req.course_id, req.user_id)
 
     from app.agents.ai_features import generate_flashcards
-    try:
-        cards = await run_in_threadpool(
-            generate_flashcards,
-            module_id=str(pc.module_id),
-            max_cards=req.max_cards,
-            topic=req.topic,
-            complexity=req.complexity,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    async with usage.guard(db, identity, "flashcards", pc.platform_course_id, topic=req.topic):
+        try:
+            cards = await run_in_threadpool(
+                generate_flashcards,
+                module_id=str(pc.module_id),
+                max_cards=req.max_cards,
+                topic=req.topic,
+                complexity=req.complexity,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     return {"course_id": pc.platform_course_id, "cards": cards, "count": len(cards)}
 
@@ -843,16 +878,17 @@ async def platform_summarise(
     pc = await _get_ready_course(db, identity, req.course_id, req.user_id)
 
     from app.agents.ai_features import generate_summary
-    try:
-        summary, _chunk_count = await run_in_threadpool(
-            generate_summary,
-            module_id=str(pc.module_id),
-            scope="module",
-            topic=req.topic,
-            complexity=req.complexity,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    async with usage.guard(db, identity, "summary", pc.platform_course_id, topic=req.topic):
+        try:
+            summary, _chunk_count = await run_in_threadpool(
+                generate_summary,
+                module_id=str(pc.module_id),
+                scope="module",
+                topic=req.topic,
+                complexity=req.complexity,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     saved = await _save_summary(db, identity, pc, (req.topic or "").strip(), req.complexity, summary)
     return {"course_id": pc.platform_course_id, **_summary_payload(saved)}
