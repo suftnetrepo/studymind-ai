@@ -20,7 +20,7 @@ class Settings(BaseSettings):
 
     # ── OpenAI ────────────────────────────────────────────────────────────
     openai_api_key: str = Field(..., description="OpenAI API key")
-    openai_chat_model: str = "gpt-4o"
+    openai_chat_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-large"
     openai_embedding_dimension: int = 3072
 
