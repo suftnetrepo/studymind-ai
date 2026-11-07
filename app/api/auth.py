@@ -331,3 +331,38 @@ async def delete_me(
     await db.delete(current_user)
     await db.commit()
     log.info("account_deleted", user_id=str(current_user.id), documents=len(doc_ids))
+
+
+@router.get("/learning-overview")
+async def learning_overview(
+    current_user: User = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """Authenticated summary of the caller's account and learning modules.
+
+    Additive endpoint for Web integration. Does not mutate existing records.
+    """
+    from sqlalchemy import func
+    from app.db.models import Enrolment, Module
+
+    owned_count = await db.scalar(
+        select(func.count(Module.id)).where(Module.owner_id == current_user.id)
+    )
+    enrolled_count = await db.scalar(
+        select(func.count(Enrolment.id))
+        .join(Module, Module.id == Enrolment.module_id)
+        .where(
+            Enrolment.student_id == current_user.id,
+            Enrolment.status == "active",
+            Module.owner_id != current_user.id,
+        )
+    )
+    return {
+        "user": {
+            "id": str(current_user.id),
+            "email": current_user.email,
+            "full_name": current_user.full_name,
+            "role": current_user.role,
+        },
+        "modules": {"owned": owned_count or 0, "enrolled": enrolled_count or 0},
+    }
