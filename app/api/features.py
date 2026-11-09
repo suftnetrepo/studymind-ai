@@ -292,8 +292,7 @@ async def generate_flashcards_endpoint(
             detail="Provide at least one of: module_id, week_id, document_id",
         )
 
-    if req.module_id is not None:
-        await _get_accessible_module(req.module_id, current_user, db)
+    await _authorize_generation_scope(req, current_user, db)
 
     async with metered_generation(current_user.id, "flashcards"):
         try:
@@ -474,8 +473,7 @@ async def summarise_endpoint(
             detail="Provide at least one of: module_id, week_id, document_id",
         )
 
-    if req.module_id is not None:
-        await _get_accessible_module(req.module_id, current_user, db)
+    await _authorize_generation_scope(req, current_user, db)
 
     async with metered_generation(current_user.id, "summary"):
         try:
