@@ -33,6 +33,7 @@ from app.db.schemas import (
 )
 from app.db.models import User
 from app.logging_config import get_logger
+from app.usage.studymind_guard import metered_generation
 
 log    = get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["features"])
@@ -61,19 +62,20 @@ async def generate_quiz_endpoint(
 
     title = req.title or _make_title("Quiz", req.module_id, req.week_id, req.document_id, db)
 
-    try:
-        questions_data = generate_quiz(
-            module_id=str(req.module_id)   if req.module_id   else None,
-            week_id=str(req.week_id)       if req.week_id     else None,
-            document_id=str(req.document_id) if req.document_id else None,
-            student_id=str(current_user.id),
-            question_count=req.question_count,
-            question_type=req.question_type,
-            title=title or "Quiz",
-            topic=req.topic,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    async with metered_generation(current_user.id, "quiz"):
+        try:
+            questions_data = generate_quiz(
+                module_id=str(req.module_id)   if req.module_id   else None,
+                week_id=str(req.week_id)       if req.week_id     else None,
+                document_id=str(req.document_id) if req.document_id else None,
+                student_id=str(current_user.id),
+                question_count=req.question_count,
+                question_type=req.question_type,
+                title=title or "Quiz",
+                topic=req.topic,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     # Persist attempt + questions
     attempt = QuizAttempt(
@@ -263,17 +265,18 @@ async def generate_flashcards_endpoint(
             detail="Provide at least one of: module_id, week_id, document_id",
         )
 
-    try:
-        cards_data = generate_flashcards(
-            module_id=str(req.module_id)     if req.module_id   else None,
-            week_id=str(req.week_id)         if req.week_id     else None,
-            document_id=str(req.document_id) if req.document_id else None,
-            student_id=str(current_user.id),
-            max_cards=req.max_cards,
-            topic=req.topic,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    async with metered_generation(current_user.id, "flashcards"):
+        try:
+            cards_data = generate_flashcards(
+                module_id=str(req.module_id)     if req.module_id   else None,
+                week_id=str(req.week_id)         if req.week_id     else None,
+                document_id=str(req.document_id) if req.document_id else None,
+                student_id=str(current_user.id),
+                max_cards=req.max_cards,
+                topic=req.topic,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     title = req.title or f"Flashcards — {len(cards_data)} cards"
 
@@ -441,17 +444,18 @@ async def summarise_endpoint(
             detail="Provide at least one of: module_id, week_id, document_id",
         )
 
-    try:
-        content, chunk_count = generate_summary(
-            module_id=str(req.module_id)     if req.module_id   else None,
-            week_id=str(req.week_id)         if req.week_id     else None,
-            document_id=str(req.document_id) if req.document_id else None,
-            student_id=str(current_user.id),
-            scope=req.scope,
-            topic=req.topic,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    async with metered_generation(current_user.id, "summary"):
+        try:
+            content, chunk_count = generate_summary(
+                module_id=str(req.module_id)     if req.module_id   else None,
+                week_id=str(req.week_id)         if req.week_id     else None,
+                document_id=str(req.document_id) if req.document_id else None,
+                student_id=str(current_user.id),
+                scope=req.scope,
+                topic=req.topic,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     summary = Summary(
         id=uuid.uuid4(),
