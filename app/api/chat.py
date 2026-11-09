@@ -38,6 +38,7 @@ from app.db.schemas import (
     SessionCreate, SessionSchema, SessionWithMessages, SessionWithScope,
 )
 from app.logging_config import get_logger
+from app.usage.studymind_guard import metered_generation
 
 log    = get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -143,18 +144,19 @@ async def chat(
     await db.flush()
 
     # Run scoped RAG query
-    result = pipeline.query(
-        question=req.message,
-        history=history,
-        top_k=req.top_k or settings.top_k_retrieval,
-        student_id=str(current_user.id),
-        module_id=module_id_str,
-        course_code=course_code,
-        scope_mode=req.scope_mode,
-        include_archived=req.include_archived,
-        semester_label=semester_label,
-        complexity=req.complexity,
-    )
+    async with metered_generation(current_user.id, "chat"):
+        result = pipeline.query(
+            question=req.message,
+            history=history,
+            top_k=req.top_k or settings.top_k_retrieval,
+            student_id=str(current_user.id),
+            module_id=module_id_str,
+            course_code=course_code,
+            scope_mode=req.scope_mode,
+            include_archived=req.include_archived,
+            semester_label=semester_label,
+            complexity=req.complexity,
+        )
 
     # Save assistant message with full metadata
     bot_msg = ChatMessage(
@@ -419,105 +421,106 @@ async def extract_text_from_image(
     if len(body.image_base64) > _MAX_IMAGE_B64:
         raise HTTPException(status_code=413, detail="Image is too large")
 
-    try:
-        resp = await _openai_client().chat.completions.create(
-            model=get_settings().openai_chat_model,
-            max_tokens=4096,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {
-                        "url": f"data:{body.mime_type};base64,{body.image_base64}",
-                    }},
-                    {"type": "text", "text": (
-                        "Extract all the text from this image exactly as it appears. "
-                        "If it is a question or problem, extract it completely. "
-                        "If it contains diagrams or equations, describe them clearly in text. "
-                        "Return only the extracted content, nothing else."
-                    )},
+    async with metered_generation(current_user.id, "chat"):
+        try:
+            resp = await _openai_client().chat.completions.create(
+                model=get_settings().openai_chat_model,
+                max_tokens=4096,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:{body.mime_type};base64,{body.image_base64}",
+                        }},
+                        {"type": "text", "text": (
+                            "Extract all the text from this image exactly as it appears. "
+                            "If it is a question or problem, extract it completely. "
+                            "If it contains diagrams or equations, describe them clearly in text. "
+                            "Return only the extracted content, nothing else."
+                        )},
+                    ],
+                }],
+            )
+            return {"text": (resp.choices[0].message.content or "").strip()}
+        except Exception as exc:
+            log.error("extract_image_failed", error=str(exc))
+            raise HTTPException(status_code=502, detail="Could not read the image")
+
+
+    @router.post("/chat/transcribe")
+    async def transcribe_audio(
+        body: TranscribeRequest,
+        current_user: User = Depends(require_auth),
+    ):
+        """Voice input: transcribe a recorded clip with Whisper."""
+        if len(body.audio_base64) > _MAX_AUDIO_B64:
+            raise HTTPException(status_code=413, detail="Recording is too long")
+        try:
+            audio_bytes = base64.b64decode(body.audio_base64, validate=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid audio data")
+
+        try:
+            transcript = await _openai_client().audio.transcriptions.create(
+                model="whisper-1",
+                file=("recording.m4a", audio_bytes),
+                language="en",
+            )
+            return {"text": transcript.text}
+        except Exception as exc:
+            log.error("transcribe_failed", error=str(exc))
+            raise HTTPException(status_code=502, detail="Could not transcribe the recording")
+
+
+    # ── General chat: no module, no RAG ────────────────────────────────────────
+
+    class GeneralChatRequest(BaseModel):
+        message:    str = Field(..., min_length=1, max_length=8192)
+        session_id: uuid.UUID | None = None
+        complexity: str = Field(default="normal", pattern="^(simple|normal|expert)$")
+
+
+    GENERAL_SYSTEM_PROMPT = """You are Revvo, a helpful and friendly AI assistant for students.
+    You can answer questions on any topic, academic or general.
+    You are NOT limited to course materials for this conversation.
+    {complexity}
+    Guidelines:
+    - Be helpful, accurate and concise
+    - If asked about mathematics, show working step by step
+    - If asked to write code, format it clearly in code blocks
+    - If asked for opinions, be balanced and educational
+    - Never make up facts; say you are unsure if you do not know
+    - Keep responses focused and well structured, using Markdown
+    """
+
+
+    @router.post("/chat/general")
+    async def general_chat(
+        req: GeneralChatRequest,
+        db: AsyncSession = Depends(get_db),
+        current_user: User = Depends(require_auth),
+    ):
+        """General-knowledge chat. Sessions with module_id=NULL are general chats."""
+        session = await _get_or_create_session(req.session_id, None, current_user, db)
+        history = await _load_history(session.id, db)
+
+        system = GENERAL_SYSTEM_PROMPT.format(
+            complexity=COMPLEXITY_MODIFIERS.get(req.complexity, COMPLEXITY_MODIFIERS["normal"])
+        )
+        started = time.monotonic()
+        try:
+            resp = await _openai_client().chat.completions.create(
+                model=get_settings().openai_chat_model,
+                max_tokens=1500,
+                messages=[
+                    {"role": "system", "content": system},
+                    *history,
+                    {"role": "user", "content": req.message},
                 ],
-            }],
-        )
-        return {"text": (resp.choices[0].message.content or "").strip()}
-    except Exception as exc:
-        log.error("extract_image_failed", error=str(exc))
-        raise HTTPException(status_code=502, detail="Could not read the image")
-
-
-@router.post("/chat/transcribe")
-async def transcribe_audio(
-    body: TranscribeRequest,
-    current_user: User = Depends(require_auth),
-):
-    """Voice input: transcribe a recorded clip with Whisper."""
-    if len(body.audio_base64) > _MAX_AUDIO_B64:
-        raise HTTPException(status_code=413, detail="Recording is too long")
-    try:
-        audio_bytes = base64.b64decode(body.audio_base64, validate=True)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid audio data")
-
-    try:
-        transcript = await _openai_client().audio.transcriptions.create(
-            model="whisper-1",
-            file=("recording.m4a", audio_bytes),
-            language="en",
-        )
-        return {"text": transcript.text}
-    except Exception as exc:
-        log.error("transcribe_failed", error=str(exc))
-        raise HTTPException(status_code=502, detail="Could not transcribe the recording")
-
-
-# ── General chat: no module, no RAG ────────────────────────────────────────
-
-class GeneralChatRequest(BaseModel):
-    message:    str = Field(..., min_length=1, max_length=8192)
-    session_id: uuid.UUID | None = None
-    complexity: str = Field(default="normal", pattern="^(simple|normal|expert)$")
-
-
-GENERAL_SYSTEM_PROMPT = """You are Revvo, a helpful and friendly AI assistant for students.
-You can answer questions on any topic, academic or general.
-You are NOT limited to course materials for this conversation.
-{complexity}
-Guidelines:
-- Be helpful, accurate and concise
-- If asked about mathematics, show working step by step
-- If asked to write code, format it clearly in code blocks
-- If asked for opinions, be balanced and educational
-- Never make up facts; say you are unsure if you do not know
-- Keep responses focused and well structured, using Markdown
-"""
-
-
-@router.post("/chat/general")
-async def general_chat(
-    req: GeneralChatRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_auth),
-):
-    """General-knowledge chat. Sessions with module_id=NULL are general chats."""
-    session = await _get_or_create_session(req.session_id, None, current_user, db)
-    history = await _load_history(session.id, db)
-
-    system = GENERAL_SYSTEM_PROMPT.format(
-        complexity=COMPLEXITY_MODIFIERS.get(req.complexity, COMPLEXITY_MODIFIERS["normal"])
-    )
-    started = time.monotonic()
-    try:
-        resp = await _openai_client().chat.completions.create(
-            model=get_settings().openai_chat_model,
-            max_tokens=1500,
-            messages=[
-                {"role": "system", "content": system},
-                *history,
-                {"role": "user", "content": req.message},
-            ],
-        )
-    except Exception as e:
-        log.error("general_chat_failed", error=str(e))
-        raise HTTPException(status_code=502, detail="The AI service is unavailable. Try again.")
+            )
+        except Exception as e:
+            log.error("general_chat_failed", error=str(e))
+            raise HTTPException(status_code=502, detail="The AI service is unavailable. Try again.")
 
     answer = (resp.choices[0].message.content or "").strip()
     latency_ms = int((time.monotonic() - started) * 1000)
