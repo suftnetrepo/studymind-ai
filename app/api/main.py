@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 
 from app.agents.llm_factory import configure_llama_settings
 from app.api.auth import router as auth_router
+from app.api.entitlements import router as entitlements_router
 from app.api.chat import router as chat_router
 from app.api.health import router as health_router
 from app.api.features import router as features_router
@@ -85,6 +86,7 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(auth_router)
+    app.include_router(entitlements_router)
     app.include_router(inst_router)
     app.include_router(modules_router)
     app.include_router(features_router)
