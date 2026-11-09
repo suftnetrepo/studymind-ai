@@ -520,6 +520,63 @@ async def enrol_in_module(
     return enrolment
 
 
+class JoinModuleRequest(BaseModel):
+    course_id: str = Field(..., min_length=3, max_length=64)
+
+
+@router.post("/modules/join")
+async def join_module_by_course_id(
+    body: JoinModuleRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    """Join a class via its UUID, course code or issued enrolment code.
+
+    Delegates to the existing enrolment rules so Web and Mobile share access checks.
+    """
+    if current_user.role not in ("student", "self_learner"):
+        raise HTTPException(status_code=403, detail="Only students can enrol in modules")
+    identifier = body.course_id.strip()
+    if not identifier or not all(c.isalnum() and c.isascii() or c in "_-" for c in identifier):
+        raise HTTPException(status_code=422, detail="Invalid Course ID")
+    try:
+        module_id = uuid.UUID(identifier)
+    except ValueError:
+        # Course codes are not globally guaranteed unique: fail closed if ambiguous.
+        matches = (await db.execute(
+            select(Module.id).where(
+                Module.course_code == identifier.upper(),
+                Module.access_type != "personal",
+                Module.status == "active",
+            ).limit(2)
+        )).scalars().all()
+        if len(matches) > 1:
+            raise HTTPException(status_code=409, detail="Course code is ambiguous. Ask for the module UUID.")
+        if matches:
+            module_id = matches[0]
+        else:
+            code = (await db.execute(select(InstitutionCode).where(
+                InstitutionCode.code == identifier,
+                InstitutionCode.code_type == "module_enrolment",
+                InstitutionCode.is_active == True,
+            ))).scalar_one_or_none()
+            if not code:
+                raise HTTPException(status_code=404, detail="Course ID not found")
+            linked = (code.metadata_ or {}).get("module_id")
+            if not linked:
+                raise HTTPException(status_code=404, detail="Course ID not found")
+            try:
+                module_id = uuid.UUID(linked)
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=404, detail="Course ID not found")
+            enrolment = await enrol_in_module(
+                module_id, EnrolRequest(enrolment_code=identifier), db, current_user
+            )
+            return {"module_id": str(enrolment.module_id), "enrolment_id": str(enrolment.id)}
+    enrolment = await enrol_in_module(module_id, EnrolRequest(), db, current_user)
+    return {"module_id": str(enrolment.module_id), "enrolment_id": str(enrolment.id)}
+
+
 @router.get("/modules/{module_id}/students", response_model=list[dict])
 async def list_enrolled_students(
     module_id: uuid.UUID,
