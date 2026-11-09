@@ -466,102 +466,102 @@ async def extract_text_from_image(
             raise HTTPException(status_code=502, detail="Could not read the image")
 
 
-    @router.post("/chat/transcribe")
-    async def transcribe_audio(
-        body: TranscribeRequest,
-        current_user: User = Depends(require_auth),
-    ):
-        """Voice input: transcribe a recorded clip with Whisper."""
-        if len(body.audio_base64) > _MAX_AUDIO_B64:
-            raise HTTPException(status_code=413, detail="Recording is too long")
-        try:
-            audio_bytes = base64.b64decode(body.audio_base64, validate=True)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid audio data")
+@router.post("/chat/transcribe")
+async def transcribe_audio(
+    body: TranscribeRequest,
+    current_user: User = Depends(require_auth),
+):
+    """Voice input: transcribe a recorded clip with Whisper."""
+    if len(body.audio_base64) > _MAX_AUDIO_B64:
+        raise HTTPException(status_code=413, detail="Recording is too long")
+    try:
+        audio_bytes = base64.b64decode(body.audio_base64, validate=True)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid audio data")
 
-        try:
-            transcript = await _openai_client().audio.transcriptions.create(
-                model="whisper-1",
-                file=("recording.m4a", audio_bytes),
-                language="en",
-            )
-            return {"text": transcript.text}
-        except Exception as exc:
-            log.error("transcribe_failed", error=str(exc))
-            raise HTTPException(status_code=502, detail="Could not transcribe the recording")
-
-
-    # ── General chat: no module, no RAG ────────────────────────────────────────
-
-    class GeneralChatRequest(BaseModel):
-        message:    str = Field(..., min_length=1, max_length=8192)
-        session_id: uuid.UUID | None = None
-        complexity: str = Field(default="normal", pattern="^(simple|normal|expert)$")
-
-
-    GENERAL_SYSTEM_PROMPT = """You are Revvo, a helpful and friendly AI assistant for students.
-    You can answer questions on any topic, academic or general.
-    You are NOT limited to course materials for this conversation.
-    {complexity}
-    Guidelines:
-    - Be helpful, accurate and concise
-    - If asked about mathematics, show working step by step
-    - If asked to write code, format it clearly in code blocks
-    - If asked for opinions, be balanced and educational
-    - Never make up facts; say you are unsure if you do not know
-    - Keep responses focused and well structured, using Markdown
-    """
-
-
-    @router.post("/chat/general")
-    async def general_chat(
-        req: GeneralChatRequest,
-        db: AsyncSession = Depends(get_db),
-        current_user: User = Depends(require_auth),
-    ):
-        """General-knowledge chat. Sessions with module_id=NULL are general chats."""
-        session = await _get_or_create_session(req.session_id, None, current_user, db)
-        history = await _load_history(session.id, db)
-
-        system = GENERAL_SYSTEM_PROMPT.format(
-            complexity=COMPLEXITY_MODIFIERS.get(req.complexity, COMPLEXITY_MODIFIERS["normal"])
+    try:
+        transcript = await _openai_client().audio.transcriptions.create(
+            model="whisper-1",
+            file=("recording.m4a", audio_bytes),
+            language="en",
         )
-        started = time.monotonic()
-        async with metered_generation(current_user.id, "chat"):
-            try:
-                resp = await _openai_client().chat.completions.create(
-                model=get_settings().openai_chat_model,
-                max_tokens=1500,
-                messages=[
-                    {"role": "system", "content": system},
-                    *history,
-                    {"role": "user", "content": req.message},
-                ],
-            )
-            except Exception as e:
-                log.error("general_chat_failed", error_type=type(e).__name__)
-                raise HTTPException(status_code=502, detail="The AI service is unavailable. Try again.")
+        return {"text": transcript.text}
+    except Exception as exc:
+        log.error("transcribe_failed", error=str(exc))
+        raise HTTPException(status_code=502, detail="Could not transcribe the recording")
 
-        answer = (resp.choices[0].message.content or "").strip()
-        latency_ms = int((time.monotonic() - started) * 1000)
 
-        db.add(ChatMessage(session_id=session.id, role="user", content=req.message))
-        bot_msg = ChatMessage(
-            session_id=session.id, role="assistant", content=answer,
-            sources=[], latency_ms=latency_ms,
-            token_count=resp.usage.total_tokens if resp.usage else None,
+# ── General chat: no module, no RAG ────────────────────────────────────────
+
+class GeneralChatRequest(BaseModel):
+    message:    str = Field(..., min_length=1, max_length=8192)
+    session_id: uuid.UUID | None = None
+    complexity: str = Field(default="normal", pattern="^(simple|normal|expert)$")
+
+
+GENERAL_SYSTEM_PROMPT = """You are Revvo, a helpful and friendly AI assistant for students.
+You can answer questions on any topic, academic or general.
+You are NOT limited to course materials for this conversation.
+{complexity}
+Guidelines:
+- Be helpful, accurate and concise
+- If asked about mathematics, show working step by step
+- If asked to write code, format it clearly in code blocks
+- If asked for opinions, be balanced and educational
+- Never make up facts; say you are unsure if you do not know
+- Keep responses focused and well structured, using Markdown
+"""
+
+
+@router.post("/chat/general")
+async def general_chat(
+    req: GeneralChatRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    """General-knowledge chat. Sessions with module_id=NULL are general chats."""
+    session = await _get_or_create_session(req.session_id, None, current_user, db)
+    history = await _load_history(session.id, db)
+
+    system = GENERAL_SYSTEM_PROMPT.format(
+        complexity=COMPLEXITY_MODIFIERS.get(req.complexity, COMPLEXITY_MODIFIERS["normal"])
+    )
+    started = time.monotonic()
+    async with metered_generation(current_user.id, "chat"):
+        try:
+            resp = await _openai_client().chat.completions.create(
+            model=get_settings().openai_chat_model,
+            max_tokens=1500,
+            messages=[
+                {"role": "system", "content": system},
+                *history,
+                {"role": "user", "content": req.message},
+            ],
         )
-        db.add(bot_msg)
-        if session.title == "New conversation":
-            session.title = req.message[:60] + ("…" if len(req.message) > 60 else "")
-        await db.commit()
-        await db.refresh(bot_msg)
-        await log_activity(current_user.id, "chat", None)
+        except Exception as e:
+            log.error("general_chat_failed", error_type=type(e).__name__)
+            raise HTTPException(status_code=502, detail="The AI service is unavailable. Try again.")
 
-        return {
-            "answer":     answer,
-            "session_id": str(session.id),
-            "message_id": str(bot_msg.id),
-            "sources":    [],
-            "latency_ms": latency_ms,
-        }
+    answer = (resp.choices[0].message.content or "").strip()
+    latency_ms = int((time.monotonic() - started) * 1000)
+
+    db.add(ChatMessage(session_id=session.id, role="user", content=req.message))
+    bot_msg = ChatMessage(
+        session_id=session.id, role="assistant", content=answer,
+        sources=[], latency_ms=latency_ms,
+        token_count=resp.usage.total_tokens if resp.usage else None,
+    )
+    db.add(bot_msg)
+    if session.title == "New conversation":
+        session.title = req.message[:60] + ("…" if len(req.message) > 60 else "")
+    await db.commit()
+    await db.refresh(bot_msg)
+    await log_activity(current_user.id, "chat", None)
+
+    return {
+        "answer":     answer,
+        "session_id": str(session.id),
+        "message_id": str(bot_msg.id),
+        "sources":    [],
+        "latency_ms": latency_ms,
+    }
