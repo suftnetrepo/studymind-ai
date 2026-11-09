@@ -21,6 +21,8 @@ async def test_free_user_entitlement_response():
     assert response["plan"] == "free"
     assert response["features"]["chat"] == {"limit": 10, "used": 0, "remaining": 10}
     assert response["features"]["quiz"]["limit"] == 2
+    assert response["allowances"]["chats"] == {"limit": 10, "remaining": 10}
+    assert response["allowances"]["quizzes"]["limit"] == 2
     assert response["enforcement_enabled"] is False
     assert db.execute.await_count == 2
 
@@ -35,3 +37,9 @@ def test_entitlement_schema_is_bound_to_canonical_user():
     from app.db.models import StudyMindEntitlement
     assert "user_id" in StudyMindEntitlement.__table__.columns
     assert "stripe_checkout_session_id" in StudyMindEntitlement.__table__.columns
+
+
+def test_web_entitlements_alias_is_registered():
+    paths = {r.path for r in router.routes}
+    assert "/api/auth/me/entitlements" in paths
+    assert "/api/me/entitlements" in paths
