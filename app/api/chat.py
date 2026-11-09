@@ -126,14 +126,18 @@ async def chat(
     if req.module_id is not None:
         await _get_accessible_module(req.module_id, current_user, db)
 
+    if req.module_id is None:
+        raise HTTPException(status_code=422, detail="A module is required for grounded AI chat")
+
     session = await _get_or_create_session(
         req.session_id, req.module_id, current_user, db
     )
     history = await _load_history(session.id, db)
 
-    module_id_str, course_code, semester_label = await _resolve_module_scope(
+    module_id_str, _course_code, semester_label = await _resolve_module_scope(
         req.module_id, db
     )
+    course_code = None  # Never broaden a module-scoped retrieval to a shared course code.
 
     settings = get_settings()
     pipeline = get_pipeline()
@@ -213,14 +217,18 @@ async def chat_stream(
     if req.module_id is not None:
         await _get_accessible_module(req.module_id, current_user, db)
 
+    if req.module_id is None:
+        raise HTTPException(status_code=422, detail="A module is required for grounded AI chat")
+
     session = await _get_or_create_session(
         req.session_id, req.module_id, current_user, db
     )
     history = await _load_history(session.id, db)
 
-    module_id_str, course_code, semester_label = await _resolve_module_scope(
+    module_id_str, _course_code, semester_label = await _resolve_module_scope(
         req.module_id, db
     )
+    course_code = None  # Never broaden a module-scoped retrieval to a shared course code.
 
     pipeline   = get_pipeline()
     settings   = get_settings()
@@ -512,10 +520,7 @@ async def extract_text_from_image(
         current_user: User = Depends(require_auth),
     ):
         """General-knowledge chat. Sessions with module_id=NULL are general chats."""
-        if req.module_id is not None:
-        await _get_accessible_module(req.module_id, current_user, db)
-
-    session = await _get_or_create_session(req.session_id, None, current_user, db)
+        session = await _get_or_create_session(req.session_id, None, current_user, db)
         history = await _load_history(session.id, db)
 
         system = GENERAL_SYSTEM_PROMPT.format(
