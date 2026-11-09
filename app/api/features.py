@@ -14,6 +14,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.modules import _get_accessible_module
 from app.activity.tracker import log_activity
 from app.agents.ai_features import (
     generate_flashcards, generate_quiz, generate_summary, score_quiz,
@@ -59,6 +60,9 @@ async def generate_quiz_endpoint(
             status_code=422,
             detail="Provide at least one of: module_id, week_id, document_id",
         )
+
+    if req.module_id is not None:
+        await _get_accessible_module(req.module_id, current_user, db)
 
     title = req.title or _make_title("Quiz", req.module_id, req.week_id, req.document_id, db)
 
@@ -265,6 +269,9 @@ async def generate_flashcards_endpoint(
             detail="Provide at least one of: module_id, week_id, document_id",
         )
 
+    if req.module_id is not None:
+        await _get_accessible_module(req.module_id, current_user, db)
+
     async with metered_generation(current_user.id, "flashcards"):
         try:
             cards_data = generate_flashcards(
@@ -443,6 +450,9 @@ async def summarise_endpoint(
             status_code=422,
             detail="Provide at least one of: module_id, week_id, document_id",
         )
+
+    if req.module_id is not None:
+        await _get_accessible_module(req.module_id, current_user, db)
 
     async with metered_generation(current_user.id, "summary"):
         try:
