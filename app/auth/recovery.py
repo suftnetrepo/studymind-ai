@@ -41,8 +41,8 @@ def send_recovery_email(to_email: str, token: str) -> None:
     message["Subject"] = "Reset your StudyMind password"
     message["From"] = s.recovery_from_email
     message["To"] = to_email
-    message.set_content("Use this link to reset your StudyMind password within 30 minutes:\\n\\n" + url
-                        + "\\n\\nIf you did not request this, ignore this message.")
+    message.set_content("Use this link to reset your StudyMind password within 30 minutes:\n\n" + url
+                        + "\n\nIf you did not request this, ignore this message.")
     with smtplib.SMTP(s.recovery_smtp_host, s.recovery_smtp_port, timeout=10) as smtp:
         smtp.starttls()
         smtp.login(s.recovery_smtp_username, s.recovery_smtp_password)
