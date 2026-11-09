@@ -748,11 +748,10 @@ async def _ingest_module_document(
     def _run():
         try:
             r = ingestor.ingest(filename, content, doc_id, **ingest_params)
-            log.info("ingest_result", status=r["status"], chunks=r["chunk_count"], error=r["error"])
+            log.info("ingest_result", status=r["status"], chunks=r["chunk_count"])
             return r
         except Exception as e:
-            log.error("ingest_exception", error=str(e))
-            import traceback; traceback.print_exc()
+            log.error("ingest_exception", error_type=type(e).__name__)
             raise
 
     result = await loop.run_in_executor(executor, _run)
@@ -776,7 +775,10 @@ async def _ingest_module_document(
                 ))
             doc_obj.status      = result["status"]
             doc_obj.chunk_count = result["chunk_count"]
-            doc_obj.error_message = result["error"]
+            doc_obj.error_message = (
+                "Document indexing failed. Please try again or contact support."
+                if result["status"] == "failed" else None
+            )
             doc_obj.indexed_at  = result["indexed_at"]
             session.commit()
         engine.dispose()
