@@ -1111,8 +1111,8 @@ async def _get_accessible_module(
     if module.access_type == "institution" and module.institution_id == user.institution_id:
         return module
 
-    # Student must be enrolled
-    if user.role == "student":
+    # Students and self-learners can both join class modules.
+    if user.role in ("student", "self_learner"):
         enrolment = await db.execute(
             select(Enrolment).where(
                 Enrolment.student_id == user.id,
