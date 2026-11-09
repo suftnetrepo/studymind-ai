@@ -202,6 +202,10 @@ async def chat_stream(
     QA-03: Streaming chat via SSE.
     Events: session → token (×N) → done (with sources + scope)
     """
+    # Do not allow the streaming endpoint to bypass paid/free quotas.
+    # Re-enable after streaming reservations and disconnect compensation are tested.
+    if get_settings().studymind_quota_enabled:
+        raise HTTPException(status_code=503, detail="Streaming chat is temporarily unavailable; use regular chat.")
     session = await _get_or_create_session(
         req.session_id, req.module_id, current_user, db
     )
