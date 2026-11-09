@@ -696,6 +696,8 @@ async def _ingest_module_document(
         .where(
             ModuleDocument.module_id == module_id,
             Document.filename == filename,
+            ModuleDocument.visibility == visibility,
+            Document.owner_id == current_user.id,
             ModuleDocument.is_latest == True,
         )
     )
@@ -1021,10 +1023,13 @@ async def delete_module_document(
 
     md, doc = row
 
-    # Only the module owner, an admin, or the person who uploaded the document may delete it
+    # Private notes are owned by their uploader, not by the class lecturer.
+    # Class documents can be deleted by their uploader or the module owner.
     module = await _get_module_or_404(module_id, db)
-    if module.owner_id != current_user.id and current_user.role != "admin" and doc.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="You can only delete your own documents")
+    if doc.owner_id != current_user.id and not (
+        md.visibility == "class" and (module.owner_id == current_user.id or current_user.role == "admin")
+    ):
+        raise HTTPException(status_code=403, detail="You can only delete your own personal notes")
 
     ts_client = get_typesense_client()
     delete_document_chunks(ts_client, str(document_id))
