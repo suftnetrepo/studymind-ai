@@ -116,26 +116,13 @@ async def forgot_password(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    ip = request.client.host if request.client else "unknown"
-    email = body.email.lower()
-    if not (_throttle(f"ip:{ip}", 20) and _throttle(f"email:{email}", 5)):
-        raise HTTPException(status_code=429, detail="Too many attempts. Please try again later.")
-
-    user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="No account found with that email.")
-    if user.role != "self_learner":
-        raise HTTPException(
-            status_code=403,
-            detail="This account type can't reset its password in the app. Please contact support.",
-        )
-
-    user.password_hash = hash_password(body.new_password)
-    from sqlalchemy import delete as sa_delete
-    await db.execute(sa_delete(RefreshToken).where(RefreshToken.user_id == user.id))
-    await db.commit()
-    log.info("password_reset_simple", user_id=str(user.id))
-    return {"ok": True}
+    # Security: legacy password reset did not verify email ownership.
+    # Disable it until a token-based, verified-email recovery flow is deployed.
+    # Do not alter user credentials or revoke existing sessions here.
+    raise HTTPException(
+        status_code=410,
+        detail="Password recovery is temporarily unavailable. Please contact support.",
+    )
 
 
 # ── AUTH-02: Login ─────────────────────────────────────────────────────────
