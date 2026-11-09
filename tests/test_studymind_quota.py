@@ -22,11 +22,17 @@ async def test_unknown_feature_is_rejected_before_database_access():
     db.execute.assert_not_awaited()
 
 
-def test_quota_is_not_implicitly_enabled_on_api_routes():
+def test_quota_rollout_is_disabled_by_default():
+    from app.config import Settings
+    assert Settings.model_fields["studymind_quota_enabled"].default is False
+
+
+def test_generation_routes_use_opt_in_guard():
     from app.api import chat, features
     from inspect import getsource
-    assert 'reserve_paid_feature' not in getsource(chat)
-    assert 'reserve_paid_feature' not in getsource(features)
+    assert 'metered_generation(current_user.id, "chat")' in getsource(chat)
+    for feature in ("quiz", "flashcards", "summary"):
+        assert f'metered_generation(current_user.id, "{feature}")' in getsource(features)
 
 
 def test_launch_allowances_and_price():
