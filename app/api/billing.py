@@ -8,6 +8,7 @@ from app.billing.stripe_webhook import (
     InvalidStripeWebhook, verify_stripe_signature, retrieve_paid_checkout, activate_paid_checkout,
 )
 from app.billing.stripe_checkout import checkout_configured, create_checkout
+from app.billing.stripe_lifecycle import retrieve_payment_intent, reconcile_payment_reversal
 from app.logging_config import get_logger
 
 router = APIRouter(prefix="/api/billing", tags=["billing"])
@@ -39,6 +40,28 @@ async def stripe_webhook(request: Request):
         )
     except InvalidStripeWebhook:
         raise HTTPException(status_code=400, detail="Invalid Stripe webhook") from None
+
+    reversal_events = {
+        "charge.refunded", "charge.dispute.created", "charge.dispute.updated",
+        "charge.dispute.closed", "charge.dispute.funds_withdrawn",
+        "charge.dispute.funds_reinstated",
+    }
+    if event["type"] in reversal_events:
+        obj = (event.get("data") or {}).get("object") or {}
+        payment_intent_id = obj.get("payment_intent")
+        if not isinstance(payment_intent_id, str) or not payment_intent_id.startswith("pi_"):
+            raise HTTPException(status_code=400, detail="Invalid payment reference")
+        try:
+            intent = await retrieve_payment_intent(payment_intent_id)
+            async with AsyncSessionLocal() as db:
+                async with db.begin():
+                    updated = await reconcile_payment_reversal(db, intent)
+        except InvalidStripeWebhook:
+            raise HTTPException(status_code=400, detail="Payment verification failed") from None
+        except Exception as exc:
+            log.error("studymind_reversal_failed", error_type=type(exc).__name__)
+            raise HTTPException(status_code=503, detail="Payment reconciliation unavailable") from None
+        return {"received": True, "reconciled": updated}
 
     if event["type"] != "checkout.session.completed":
         # Do not activate on refunds, disputes, or asynchronous unpaid events.
