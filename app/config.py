@@ -119,6 +119,13 @@ class Settings(BaseSettings):
     # Safe rollout: disabled until migrations, concurrency and refund tests pass.
     studymind_quota_enabled: bool = False
 
+    # Web-only Stripe one-time pass. Disabled until staging webhook validation.
+    studymind_billing_enabled: bool = False
+    studymind_stripe_secret_key: str = ""
+    studymind_stripe_webhook_secret: str = ""
+    studymind_checkout_success_url: str = ""
+    studymind_checkout_cancel_url: str = ""
+
     # Password recovery remains unavailable until verified SMTP is configured.
     password_recovery_enabled: bool = False
     recovery_smtp_host: str = ""
