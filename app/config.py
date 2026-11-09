@@ -118,6 +118,15 @@ class Settings(BaseSettings):
     # Sessions without a policy are never limited.
     # Safe rollout: disabled until migrations, concurrency and refund tests pass.
     studymind_quota_enabled: bool = False
+
+    # Password recovery remains unavailable until verified SMTP is configured.
+    password_recovery_enabled: bool = False
+    recovery_smtp_host: str = ""
+    recovery_smtp_port: int = 587
+    recovery_smtp_username: str = ""
+    recovery_smtp_password: str = ""
+    recovery_from_email: str = ""
+    recovery_public_url: str = ""
     usage_policy_platforms: str = "learnify"
     usage_policy_timezone: str = "Europe/London"
     # learnify_free_course_pass — frozen onto each policy when it is created
