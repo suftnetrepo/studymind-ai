@@ -22,7 +22,7 @@ from app.agents.ai_features import (
 from app.auth.dependencies import require_auth
 from app.db.engine import get_db
 from app.db.models import (
-    Document, Flashcard, FlashcardDeck, Module,
+    Document, Flashcard, FlashcardDeck, Module, ModuleDocument,
     QuizAttempt, QuizQuestion, Summary, Week,
 )
 from app.db.schemas import (
@@ -39,6 +39,30 @@ from app.usage.studymind_guard import metered_generation
 log    = get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["features"])
 
+
+
+
+async def _authorize_generation_scope(req, current_user: User, db: AsyncSession) -> None:
+    """Fail closed before invoking any AI provider or retrieval.
+
+    Document-specific generation is disabled until the retriever enforces the
+    document ID (currently it ignores the ID and searches wider material).
+    """
+    if req.document_id is not None:
+        raise HTTPException(status_code=422, detail="Document-specific AI generation is temporarily unavailable")
+    module_id = req.module_id
+    if req.week_id is not None:
+        week_module_id = (await db.execute(
+            select(Week.module_id).where(Week.id == req.week_id)
+        )).scalar_one_or_none()
+        if week_module_id is None:
+            raise HTTPException(status_code=404, detail="Week not found")
+        if module_id is not None and module_id != week_module_id:
+            raise HTTPException(status_code=403, detail="Week does not belong to this module")
+        module_id = week_module_id
+    if module_id is None:
+        raise HTTPException(status_code=422, detail="A module or week is required")
+    await _get_accessible_module(module_id, current_user, db)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # QUIZ
@@ -61,8 +85,7 @@ async def generate_quiz_endpoint(
             detail="Provide at least one of: module_id, week_id, document_id",
         )
 
-    if req.module_id is not None:
-        await _get_accessible_module(req.module_id, current_user, db)
+    await _authorize_generation_scope(req, current_user, db)
 
     title = req.title or _make_title("Quiz", req.module_id, req.week_id, req.document_id, db)
 
