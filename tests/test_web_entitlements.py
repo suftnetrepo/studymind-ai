@@ -18,11 +18,11 @@ class _Scalars:
 async def test_free_user_entitlement_response():
     db = SimpleNamespace(execute=AsyncMock(return_value=_Scalars([])))
     response = await my_entitlements(db, SimpleNamespace(id=uuid4()))
-    assert response == {
-        "plan": "free", "expires_at": None, "features": {},
-        "enforcement_enabled": False,
-    }
-    db.execute.assert_awaited_once()
+    assert response["plan"] == "free"
+    assert response["features"]["chat"] == {"limit": 10, "used": 0, "remaining": 10}
+    assert response["features"]["quiz"]["limit"] == 2
+    assert response["enforcement_enabled"] is False
+    assert db.execute.await_count == 2
 
 
 def test_entitlement_endpoint_read_only():
