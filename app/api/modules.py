@@ -1053,29 +1053,40 @@ async def get_document_versions(
     """DOC-11: Show version history for a document."""
     await _get_accessible_module(module_id, current_user, db)
 
+    # Resolve only a document belonging to this module; never disclose another
+    # learner's private note or use its filename to enumerate versions.
+    target_result = await db.execute(
+        select(ModuleDocument, Document)
+        .join(Document, Document.id == ModuleDocument.document_id)
+        .where(ModuleDocument.module_id == module_id, Document.id == document_id)
+    )
+    target = target_result.first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Document not found")
+    target_md, target_doc = target
+    if target_md.visibility == "personal" and target_doc.owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Document not found")
+
     result = await db.execute(
         select(ModuleDocument, Document)
         .join(Document, Document.id == ModuleDocument.document_id)
-        .where(ModuleDocument.module_id == module_id)
+        .where(
+            ModuleDocument.module_id == module_id,
+            Document.filename == target_doc.filename,
+            Document.owner_id == target_doc.owner_id,
+            ModuleDocument.visibility == target_md.visibility,
+        )
         .order_by(ModuleDocument.version.desc())
     )
-
-    # Find the filename of this document first
-    target = await db.execute(select(Document).where(Document.id == document_id))
-    target_doc = target.scalar_one_or_none()
-    if not target_doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
     versions = []
     for md, doc in result.all():
-        if doc.filename == target_doc.filename:
-            versions.append(DocumentVersionSchema(
-                version=md.version,
-                created_at=md.created_at,
-                is_latest=md.is_latest,
-                document_id=doc.id,
-                filename=doc.filename,
-            ))
+        versions.append(DocumentVersionSchema(
+            version=md.version,
+            created_at=md.created_at,
+            is_latest=md.is_latest,
+            document_id=doc.id,
+            filename=doc.filename,
+        ))
     return versions
 
 
