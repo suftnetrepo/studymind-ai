@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.dependencies import require_auth
 from app.db.engine import get_db
 from app.db.models import StudyMindEntitlement, StudyMindUsageCounter, User
+from app.usage.studymind_quota import FREE_LIMITS
 
 router = APIRouter(prefix="/api", tags=["entitlements"])
 
@@ -31,7 +32,17 @@ async def my_entitlements(
         ).order_by(StudyMindEntitlement.expires_at.desc())
     )).scalars().all()
     if not rows:
-        return {"plan": "free", "expires_at": None, "features": {}, "enforcement_enabled": False}
+        month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+        free_counters = (await db.execute(select(StudyMindUsageCounter).where(
+            StudyMindUsageCounter.user_id == current_user.id,
+            StudyMindUsageCounter.period_start == month_start,
+        ))).scalars().all()
+        used = {c.feature: c.used for c in free_counters}
+        features = {name: {"limit": limit, "used": used.get(name, 0),
+                    "remaining": max(0, limit - used.get(name, 0))}
+                    for name, limit in FREE_LIMITS.items()}
+        return {"plan": "free", "expires_at": None, "features": features,
+                "enforcement_enabled": False}
 
     # Multiple overlapping purchases are not summed until the billing policy is finalised.
     entitlement = rows[0]
