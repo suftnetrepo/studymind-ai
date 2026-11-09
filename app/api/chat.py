@@ -27,6 +27,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.modules import _get_accessible_module
 from app.activity.tracker import log_activity
 from app.agents.rag_pipeline import COMPLEXITY_MODIFIERS, get_pipeline
 from app.auth.dependencies import require_auth
@@ -122,6 +123,9 @@ async def chat(
     QA-01: Ask a question. Returns grounded answer with citations and scope indicator.
     Supports /csc109/week3 shortcuts in the message prefix.
     """
+    if req.module_id is not None:
+        await _get_accessible_module(req.module_id, current_user, db)
+
     session = await _get_or_create_session(
         req.session_id, req.module_id, current_user, db
     )
@@ -206,6 +210,9 @@ async def chat_stream(
     # Re-enable after streaming reservations and disconnect compensation are tested.
     if get_settings().studymind_quota_enabled:
         raise HTTPException(status_code=503, detail="Streaming chat is temporarily unavailable; use regular chat.")
+    if req.module_id is not None:
+        await _get_accessible_module(req.module_id, current_user, db)
+
     session = await _get_or_create_session(
         req.session_id, req.module_id, current_user, db
     )
@@ -505,7 +512,10 @@ async def extract_text_from_image(
         current_user: User = Depends(require_auth),
     ):
         """General-knowledge chat. Sessions with module_id=NULL are general chats."""
-        session = await _get_or_create_session(req.session_id, None, current_user, db)
+        if req.module_id is not None:
+        await _get_accessible_module(req.module_id, current_user, db)
+
+    session = await _get_or_create_session(req.session_id, None, current_user, db)
         history = await _load_history(session.id, db)
 
         system = GENERAL_SYSTEM_PROMPT.format(
