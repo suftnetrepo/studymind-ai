@@ -117,3 +117,23 @@ async def reserve_feature(db: AsyncSession, user_id: UUID, feature: str) -> dict
     await db.flush()
     return {"plan": plan, "feature": feature, "limit": limit, "remaining": limit - counter.used,
             "period_start": period}
+
+
+async def refund_feature(db: AsyncSession, user_id: UUID, feature: str, period_start: datetime) -> bool:
+    """Compensate a failed generation, never reducing a counter below zero.
+
+    Call in a NEW transaction after a previously committed reservation.
+    """
+    if feature not in FREE_LIMITS:
+        raise ValueError("Unsupported AI feature")
+    await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _lock_id(user_id)})
+    counter = (await db.execute(select(StudyMindUsageCounter).where(
+        StudyMindUsageCounter.user_id == user_id,
+        StudyMindUsageCounter.feature == feature,
+        StudyMindUsageCounter.period_start == period_start,
+    ).with_for_update())).scalar_one_or_none()
+    if counter is None or counter.used <= 0:
+        return False
+    counter.used -= 1
+    await db.flush()
+    return True
