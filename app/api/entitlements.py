@@ -18,6 +18,15 @@ from app.usage.studymind_quota import FREE_LIMITS
 router = APIRouter(prefix="/api", tags=["entitlements"])
 
 
+def _web_allowances(features: dict) -> dict:
+    names = {"chat": "chats", "quiz": "quizzes", "flashcards": "flashcards", "summary": "summaries"}
+    return {public: {"limit": features.get(internal, {}).get("limit", 0),
+                     "remaining": features.get(internal, {}).get("remaining", 0)}
+            for internal, public in names.items()}
+
+
+
+@router.get("/auth/me/entitlements", include_in_schema=False)
 @router.get("/me/entitlements")
 async def my_entitlements(
     db: AsyncSession = Depends(get_db),
@@ -43,6 +52,7 @@ async def my_entitlements(
                     "remaining": max(0, limit - used.get(name, 0))}
                     for name, limit in FREE_LIMITS.items()}
         return {"plan": "free", "expires_at": None, "features": features,
+                "allowances": _web_allowances(features),
                 "enforcement_enabled": get_settings().studymind_quota_enabled}
 
     # Multiple overlapping purchases are not summed until the billing policy is finalised.
@@ -61,6 +71,7 @@ async def my_entitlements(
         for name, limit in limits.items()
     }
     return {
-        "plan": "paid", "expires_at": entitlement.expires_at.isoformat(),
-        "features": features, "enforcement_enabled": False,
+        "plan": "plus", "expires_at": entitlement.expires_at.isoformat(),
+        "features": features, "allowances": _web_allowances(features),
+        "enforcement_enabled": get_settings().studymind_quota_enabled,
     }
