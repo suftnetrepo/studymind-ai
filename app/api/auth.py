@@ -114,28 +114,16 @@ def _throttle(key: str, limit: int, window_s: int = 3600) -> bool:
 async def forgot_password(
     body: ForgotPasswordRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
 ):
-    ip = request.client.host if request.client else "unknown"
-    email = body.email.lower()
-    if not (_throttle(f"ip:{ip}", 20) and _throttle(f"email:{email}", 5)):
-        raise HTTPException(status_code=429, detail="Too many attempts. Please try again later.")
+    """Fail closed: legacy email-only password changes are unsafe.
 
-    user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="No account found with that email.")
-    if user.role != "self_learner":
-        raise HTTPException(
-            status_code=403,
-            detail="This account type can't reset its password in the app. Please contact support.",
-        )
-
-    user.password_hash = hash_password(body.new_password)
-    from sqlalchemy import delete as sa_delete
-    await db.execute(sa_delete(RefreshToken).where(RefreshToken.user_id == user.id))
-    await db.commit()
-    log.info("password_reset_simple", user_id=str(user.id))
-    return {"ok": True}
+    A verified, single-use recovery flow must replace this endpoint before
+    password recovery can be re-enabled. Never change credentials here.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail="Password recovery is temporarily unavailable. Please contact support.",
+    )
 
 
 # ── AUTH-02: Login ─────────────────────────────────────────────────────────
