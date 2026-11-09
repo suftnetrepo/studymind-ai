@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_auth
 from app.db.engine import get_db
+from app.config import get_settings
 from app.db.models import StudyMindEntitlement, StudyMindUsageCounter, User
 from app.usage.studymind_quota import FREE_LIMITS
 
@@ -42,7 +43,7 @@ async def my_entitlements(
                     "remaining": max(0, limit - used.get(name, 0))}
                     for name, limit in FREE_LIMITS.items()}
         return {"plan": "free", "expires_at": None, "features": features,
-                "enforcement_enabled": False}
+                "enforcement_enabled": get_settings().studymind_quota_enabled}
 
     # Multiple overlapping purchases are not summed until the billing policy is finalised.
     entitlement = rows[0]
