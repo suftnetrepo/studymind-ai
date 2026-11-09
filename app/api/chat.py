@@ -512,8 +512,9 @@ async def extract_text_from_image(
             complexity=COMPLEXITY_MODIFIERS.get(req.complexity, COMPLEXITY_MODIFIERS["normal"])
         )
         started = time.monotonic()
-        try:
-            resp = await _openai_client().chat.completions.create(
+        async with metered_generation(current_user.id, "chat"):
+            try:
+                resp = await _openai_client().chat.completions.create(
                 model=get_settings().openai_chat_model,
                 max_tokens=1500,
                 messages=[
@@ -522,30 +523,30 @@ async def extract_text_from_image(
                     {"role": "user", "content": req.message},
                 ],
             )
-        except Exception as e:
-            log.error("general_chat_failed", error=str(e))
-            raise HTTPException(status_code=502, detail="The AI service is unavailable. Try again.")
+            except Exception as e:
+                log.error("general_chat_failed", error_type=type(e).__name__)
+                raise HTTPException(status_code=502, detail="The AI service is unavailable. Try again.")
 
-    answer = (resp.choices[0].message.content or "").strip()
-    latency_ms = int((time.monotonic() - started) * 1000)
+        answer = (resp.choices[0].message.content or "").strip()
+        latency_ms = int((time.monotonic() - started) * 1000)
 
-    db.add(ChatMessage(session_id=session.id, role="user", content=req.message))
-    bot_msg = ChatMessage(
-        session_id=session.id, role="assistant", content=answer,
-        sources=[], latency_ms=latency_ms,
-        token_count=resp.usage.total_tokens if resp.usage else None,
-    )
-    db.add(bot_msg)
-    if session.title == "New conversation":
-        session.title = req.message[:60] + ("…" if len(req.message) > 60 else "")
-    await db.commit()
-    await db.refresh(bot_msg)
-    await log_activity(current_user.id, "chat", None)
+        db.add(ChatMessage(session_id=session.id, role="user", content=req.message))
+        bot_msg = ChatMessage(
+            session_id=session.id, role="assistant", content=answer,
+            sources=[], latency_ms=latency_ms,
+            token_count=resp.usage.total_tokens if resp.usage else None,
+        )
+        db.add(bot_msg)
+        if session.title == "New conversation":
+            session.title = req.message[:60] + ("…" if len(req.message) > 60 else "")
+        await db.commit()
+        await db.refresh(bot_msg)
+        await log_activity(current_user.id, "chat", None)
 
-    return {
-        "answer":     answer,
-        "session_id": str(session.id),
-        "message_id": str(bot_msg.id),
-        "sources":    [],
-        "latency_ms": latency_ms,
-    }
+        return {
+            "answer":     answer,
+            "session_id": str(session.id),
+            "message_id": str(bot_msg.id),
+            "sources":    [],
+            "latency_ms": latency_ms,
+        }
