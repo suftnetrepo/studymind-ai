@@ -27,3 +27,13 @@ def test_quota_is_not_implicitly_enabled_on_api_routes():
     from inspect import getsource
     assert 'reserve_paid_feature' not in getsource(chat)
     assert 'reserve_paid_feature' not in getsource(features)
+
+
+def test_launch_allowances_and_price():
+    from app.usage.studymind_quota import (
+        FREE_LIMITS, PLUS_LIMITS, PLUS_PRICE_GBP_PENCE, PLUS_DURATION_DAYS,
+    )
+    assert FREE_LIMITS == {"chat": 10, "quiz": 2, "flashcards": 2, "summary": 1}
+    assert PLUS_LIMITS == {"chat": 200, "quiz": 30, "flashcards": 30, "summary": 15}
+    assert PLUS_PRICE_GBP_PENCE == 399
+    assert PLUS_DURATION_DAYS == 28
