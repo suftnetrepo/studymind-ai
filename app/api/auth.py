@@ -184,6 +184,13 @@ async def confirm_password_recovery(
         raise HTTPException(status_code=400, detail="Reset link is invalid or expired.")
     user.password_hash = hash_password(body.new_password)
     token.used = True
+    # Invalidate all other outstanding reset links for this account.
+    await db.execute(
+        PasswordResetToken.__table__.update().where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used == False,
+        ).values(used=True)
+    )
     # Revoke all refresh sessions; already-issued short-lived access JWTs remain
     # valid until expiry (currently 60 minutes).
     await db.execute(
