@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     openai_chat_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-large"
     openai_embedding_dimension: int = 3072
+    # Client retry/timeout bounds. Defaults equal the previous library defaults (no behaviour change);
+    # cost-controlled test runs set OPENAI_LLM_MAX_RETRIES / OPENAI_EMBED_MAX_RETRIES to 0 or 1.
+    openai_llm_max_retries: int = Field(default=3, ge=0, le=10)
+    openai_embed_max_retries: int = Field(default=10, ge=0, le=10)
+    openai_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
 
     # ── PostgreSQL ────────────────────────────────────────────────────────
     # If DATABASE_URL is set (e.g. a managed Postgres like Neon), it takes
