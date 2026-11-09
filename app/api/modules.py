@@ -656,11 +656,14 @@ async def _ingest_module_document(
     """Shared by file upload, paste-text and AI-generated study material."""
     module = await _get_accessible_module(module_id, current_user, db)
 
-    # Access control: only lecturer/owner can upload class materials
-    if visibility == "class" and current_user.role == "student":
+    # Only the module owner or an administrator may publish class-wide files.
+    # This also protects against direct API calls from enrolled self-learners.
+    if visibility not in ("class", "personal"):
+        raise HTTPException(status_code=422, detail="Invalid document visibility")
+    if visibility == "class" and module.owner_id != current_user.id and current_user.role != "admin":
         raise HTTPException(
             status_code=403,
-            detail="Students cannot upload class materials. Use visibility=personal for personal notes.",
+            detail="Only the module owner may publish class materials. Use visibility=personal for personal notes.",
         )
 
     # Resolve week metadata
@@ -973,12 +976,12 @@ async def list_module_documents(
     if week_id:
         query = query.where(ModuleDocument.week_id == week_id)
 
-    # SRCH-08: Students see class + their own personal notes only
-    if current_user.role in ("student", "self_learner"):
-        query = query.where(
-            (ModuleDocument.visibility == "class") |
-            ((ModuleDocument.visibility == "personal") & (Document.owner_id == current_user.id))
-        )
+    # Personal notes are private to their uploader, including from lecturers.
+    # Administrators are not implicitly granted access to private study notes.
+    query = query.where(
+        (ModuleDocument.visibility == "class") |
+        ((ModuleDocument.visibility == "personal") & (Document.owner_id == current_user.id))
+    )
 
     result = await db.execute(query.order_by(ModuleDocument.created_at.desc()))
     out    = []
