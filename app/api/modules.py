@@ -569,6 +569,8 @@ async def join_module_by_course_id(
                 module_id = uuid.UUID(linked)
             except (ValueError, TypeError):
                 raise HTTPException(status_code=404, detail="Course ID not found")
+            if len(identifier) > 32:
+                raise HTTPException(status_code=422, detail="Enrolment code is too long")
             enrolment = await enrol_in_module(
                 module_id, EnrolRequest(enrolment_code=identifier), db, current_user
             )
@@ -962,8 +964,6 @@ async def list_module_documents(
         select(ModuleDocument, Document)
         .join(Document, Document.id == ModuleDocument.document_id)
         .where(ModuleDocument.module_id == module_id)
-        .where(Document.chunk_count > 0)
-        .where(Document.status == "indexed")
     )
 
     if latest_only:
@@ -972,7 +972,7 @@ async def list_module_documents(
         query = query.where(ModuleDocument.week_id == week_id)
 
     # SRCH-08: Students see class + their own personal notes only
-    if current_user.role == "student":
+    if current_user.role in ("student", "self_learner"):
         query = query.where(
             (ModuleDocument.visibility == "class") |
             ((ModuleDocument.visibility == "personal") & (Document.owner_id == current_user.id))
