@@ -116,6 +116,8 @@ class Settings(BaseSettings):
     # ── Usage policies (opt-in quotas for pass sessions; see app/services/usage_policy.py) ──
     # Only API keys whose `platform` is listed may attach a usage policy to a session token.
     # Sessions without a policy are never limited.
+    # Safe rollout: disabled until migrations, concurrency and refund tests pass.
+    studymind_quota_enabled: bool = False
     usage_policy_platforms: str = "learnify"
     usage_policy_timezone: str = "Europe/London"
     # learnify_free_course_pass — frozen onto each policy when it is created
