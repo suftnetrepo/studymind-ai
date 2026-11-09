@@ -59,11 +59,9 @@ async def my_entitlements(
     entitlement = rows[0]
     counters = (await db.execute(select(StudyMindUsageCounter).where(
         StudyMindUsageCounter.user_id == current_user.id,
-        StudyMindUsageCounter.period_start >= entitlement.starts_at,
+        StudyMindUsageCounter.period_start == entitlement.starts_at,
     ))).scalars().all()
-    used = {}
-    for counter in counters:
-        used[counter.feature] = used.get(counter.feature, 0) + counter.used
+    used = {counter.feature: counter.used for counter in counters}
     limits = entitlement.feature_limits or {}
     features = {
         name: {"limit": int(limit), "used": used.get(name, 0),
