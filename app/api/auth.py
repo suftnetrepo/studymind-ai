@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import asyncio
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -27,7 +28,7 @@ from app.auth.security import (
 )
 from app.config import get_settings
 from app.db.engine import get_db
-from app.db.models import RefreshToken, User
+from app.db.models import RefreshToken, User, PasswordResetToken
 from app.db.schemas import (
     ForgotPasswordRequest,
     LoginRequest,
@@ -38,6 +39,8 @@ from app.db.schemas import (
     UserUpdateRequest,
 )
 from app.logging_config import get_logger
+from app.auth.recovery import new_recovery_token, hash_recovery_token, recovery_expiry, recovery_configured, send_recovery_email
+from pydantic import BaseModel, EmailStr, Field
 
 log    = get_logger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -124,6 +127,70 @@ async def forgot_password(
         status_code=410,
         detail="Password recovery is temporarily unavailable. Please contact support.",
     )
+
+
+class RecoveryRequest(BaseModel):
+    email: EmailStr
+
+
+class RecoveryConfirm(BaseModel):
+    token: str = Field(min_length=30, max_length=256)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+@router.post("/password-recovery/request", status_code=202)
+async def request_password_recovery(
+    body: RecoveryRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Email a one-time reset link without revealing account existence."""
+    if not recovery_configured():
+        raise HTTPException(status_code=503, detail="Password recovery is temporarily unavailable.")
+    ip = request.client.host if request.client else "unknown"
+    email = body.email.lower()
+    if not (_throttle(f"recovery-ip:{ip}", 10) and _throttle(f"recovery-email:{email}", 3)):
+        raise HTTPException(status_code=429, detail="Too many attempts. Please try later.")
+    user = (await db.execute(select(User).where(User.email == email, User.is_active == True))).scalar_one_or_none()
+    if user is not None:
+        raw, digest = new_recovery_token()
+        db.add(PasswordResetToken(user_id=user.id, token_hash=digest, expires_at=recovery_expiry(), used=False))
+        await db.commit()
+        try:
+            await asyncio.to_thread(send_recovery_email, user.email, raw)
+        except Exception as exc:
+            log.error("recovery_delivery_failed", error_type=type(exc).__name__)
+    return {"message": "If an eligible account exists, a reset link will be sent."}
+
+
+@router.post("/password-recovery/confirm", status_code=204)
+async def confirm_password_recovery(
+    body: RecoveryConfirm,
+    db: AsyncSession = Depends(get_db),
+):
+    """Consume the hashed token once, change password, revoke all refresh tokens."""
+    if not recovery_configured():
+        raise HTTPException(status_code=503, detail="Password recovery is temporarily unavailable.")
+    if not any(c.isupper() for c in body.new_password) or not any(c.isdigit() for c in body.new_password):
+        raise HTTPException(status_code=422, detail="Password requires an uppercase letter and a digit.")
+    token = (await db.execute(select(PasswordResetToken).where(
+        PasswordResetToken.token_hash == hash_recovery_token(body.token),
+    ).with_for_update())).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if token is None or token.used or token.expires_at < now:
+        raise HTTPException(status_code=400, detail="Reset link is invalid or expired.")
+    user = (await db.execute(select(User).where(User.id == token.user_id).with_for_update())).scalar_one_or_none()
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=400, detail="Reset link is invalid or expired.")
+    user.password_hash = hash_password(body.new_password)
+    token.used = True
+    # Revoke all refresh sessions; already-issued short-lived access JWTs remain
+    # valid until expiry (currently 60 minutes).
+    await db.execute(
+        RefreshToken.__table__.update().where(RefreshToken.user_id == user.id).values(revoked=True)
+    )
+    await db.commit()
+    log.info("password_recovered", user_id=str(user.id))
 
 
 # ── AUTH-02: Login ─────────────────────────────────────────────────────────
