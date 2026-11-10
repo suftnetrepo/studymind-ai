@@ -7,8 +7,10 @@ you choose to set them there.
 |---|---|---|---|
 | `SIMILARITY_THRESHOLD` | `0.20` | `0.25` | Measured, see below. Re-tune on real staging documents. |
 | `RETRIEVAL_VECTOR_K` | `100` | `100` | Vector candidate depth. Keeps keyword hits inside the vector result so every hit has a real similarity. |
-| `OPENAI_CHAT_MODEL` | **confirm** | `gpt-4.1-mini` | A local backend `.env` sets `gpt-4o`. Run `python scripts/print_model_config.py` in staging. |
-| `OPENAI_LLM_MAX_RETRIES` / `OPENAI_EMBED_MAX_RETRIES` | `1` / `1` | `3` / `10` | Bounds paid retries on failure. |
+| `OPENAI_CHAT_MODEL` | `gpt-4.1-mini` (pinned) | `gpt-4.1-mini` | A local backend `.env` sets `gpt-4o` (~6x the price): never inherit it. `scripts/verify_staging_env.py --expect-model` enforces this. |
+| `OPENAI_LLM_MAX_RETRIES` / `OPENAI_EMBED_MAX_RETRIES` | `1` / `0` | `3` / `10` | Bounds paid retries on failure. |
+| `OPENAI_API_BASE` / `OPENAI_BASE_URL` | `http://budget-proxy:18300/v1` | unset | Routes OpenAI through the budget proxy so the cost ceiling is enforced. The API must hold only a dummy key. |
+| `APP_ENV` | `staging` | `development` | Checked by `scripts/verify_staging_env.py`. See `docs/staging-runbook.md`. |
 | `OPENAI_TIMEOUT_SECONDS` | `60` | `60` | |
 
 `scripts/print_model_config.py` prints the effective models, prices, retrieval settings and worst-case per-request

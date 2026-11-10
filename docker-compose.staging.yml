@@ -1,0 +1,99 @@
+# STAGING stack. Fully separate from docker-compose.prod.yml: its own project name, container names, ports (loopback only),
+# volumes, database, Typesense and env. Never start it with the production env file and never reuse production volumes.
+#
+#   cp staging.env.example .env.staging      # fill in; this file is git-ignored
+#   python scripts/verify_staging_env.py ... # must say READY before you start anything
+#   docker compose -f docker-compose.staging.yml --env-file .env.staging up -d
+#
+# Cost control: the API holds only a dummy OpenAI key and reaches OpenAI through `budget-proxy`, which holds the real key
+# and enforces the dollar ceiling and call caps (persisted across restarts). Do not publish the proxy beyond loopback.
+name: studymind-staging
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: studymind_staging_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: studymind_staging
+      POSTGRES_USER: ${STAGING_POSTGRES_USER:?set STAGING_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${STAGING_POSTGRES_PASSWORD:?set STAGING_POSTGRES_PASSWORD}
+    ports: ["127.0.0.1:15432:5432"]
+    volumes: ["staging_postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d studymind_staging"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  typesense:
+    image: typesense/typesense:0.25.2
+    container_name: studymind_staging_typesense
+    restart: unless-stopped
+    ports: ["127.0.0.1:18108:8108"]
+    volumes: ["staging_typesense_data:/data"]
+    command: --data-dir=/data --api-key=${STAGING_TYPESENSE_API_KEY:?set STAGING_TYPESENSE_API_KEY}
+
+  budget-proxy:
+    image: node:22-alpine
+    container_name: studymind_staging_budget_proxy
+    restart: unless-stopped
+    working_dir: /app
+    command: ["node", "/app/proxy.mjs"]
+    environment:
+      HOST: 0.0.0.0                       # reachable only on this compose network and on loopback via the port below
+      PORT: "18300"
+      PROXY_OPENAI_API_KEY: ${PROXY_OPENAI_API_KEY:?set PROXY_OPENAI_API_KEY (the only place the real key lives)}
+      MAX_USD: ${STAGING_MAX_USD:-5}
+      MAX_CHAT_CALLS: ${STAGING_MAX_CHAT_CALLS:-300}
+      MAX_EMBED_CALLS: ${STAGING_MAX_EMBED_CALLS:-2000}
+      LEDGER_FILE: /data/ledger.json      # persisted: a restart cannot reset the ceiling
+    ports: ["127.0.0.1:18300:18300"]
+    volumes:
+      - ./ops/openai-budget-proxy.mjs:/app/proxy.mjs:ro
+      - staging_proxy_data:/data
+
+  api:
+    build: { context: ., dockerfile: Dockerfile }
+    container_name: studymind_staging_api
+    restart: unless-stopped
+    ports: ["127.0.0.1:18000:8000"]
+    env_file: .env.staging
+    environment:
+      APP_ENV: staging
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: studymind_staging
+      POSTGRES_USER: ${STAGING_POSTGRES_USER}
+      POSTGRES_PASSWORD: ${STAGING_POSTGRES_PASSWORD}
+      TYPESENSE_HOST: typesense
+      TYPESENSE_PORT: "8108"
+      TYPESENSE_API_KEY: ${STAGING_TYPESENSE_API_KEY}
+      # OpenAI only through the budget proxy; the API never sees the real key.
+      OPENAI_API_KEY: dummy-staging-backend-key-not-real
+      OPENAI_API_BASE: http://budget-proxy:18300/v1
+      OPENAI_BASE_URL: http://budget-proxy:18300/v1
+      OPENAI_CHAT_MODEL: gpt-4.1-mini
+      SIMILARITY_THRESHOLD: "0.20"
+      RETRIEVAL_VECTOR_K: "100"
+      OPENAI_LLM_MAX_RETRIES: "1"
+      OPENAI_EMBED_MAX_RETRIES: "0"
+      OPENAI_TIMEOUT_SECONDS: "60"
+      # Off in staging until separately approved: payments, quota enforcement, recovery email, shared document storage.
+      STUDYMIND_BILLING_ENABLED: "false"
+      STUDYMIND_QUOTA_ENABLED: "false"
+      PASSWORD_RECOVERY_ENABLED: "false"
+      CLOUDINARY_CLOUD_NAME: ""
+      CLOUDINARY_API_KEY: ""
+      CLOUDINARY_API_SECRET: ""
+    depends_on:
+      postgres: { condition: service_healthy }
+      typesense: { condition: service_started }
+      budget-proxy: { condition: service_started }
+    volumes: ["staging_uploads_data:/app/uploads"]
+
+volumes:
+  staging_postgres_data:
+  staging_typesense_data:
+  staging_proxy_data:
+  staging_uploads_data:
