@@ -116,6 +116,8 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 64
     top_k_retrieval: int = 6
+    # Vector candidate depth for hybrid search (>= top_k). Keeps keyword hits inside the vector result set so they carry a real similarity.
+    retrieval_vector_k: int = Field(default=100, ge=1, le=250)
     similarity_threshold: float = 0.25
 
     # ── Usage policies (opt-in quotas for pass sessions; see app/services/usage_policy.py) ──
