@@ -44,5 +44,8 @@ jobs:
       - name: Application import and route registration
         run: python scripts/check_app_startup.py
 
+      - name: Model configuration is priced (default model is in the price table)
+        run: python scripts/print_model_config.py
+
       - name: Tests
         run: python -m pytest -q
