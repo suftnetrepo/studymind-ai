@@ -65,6 +65,11 @@ async def create_checkout(user_id: str, email: str) -> dict:
         "metadata[studymind_product]": "plus_28d_v1",
         "payment_intent_data[metadata][studymind_user_id]": user_id,
     }
+    tax_code = getattr(s, "studymind_stripe_tax_code", "")
+    if isinstance(tax_code, str) and tax_code.startswith("txcd_"):
+        data["line_items[0][price_data][product_data][tax_code]"] = tax_code
+    if getattr(s, "studymind_stripe_managed_payments", True) is False:
+        data["managed_payments[enabled]"] = "false"
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(
             f"{stripe_api_base()}/v1/checkout/sessions",

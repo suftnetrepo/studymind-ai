@@ -279,3 +279,51 @@ async def test_simultaneous_requests_cannot_overspend_the_free_allowance(user):
             return False
     results = await asyncio.gather(*[one() for _ in range(25)])
     assert results.count(True) == 10 and results.count(False) == 15
+
+
+# ── Checkout request shape (what is sent to Stripe) ───────────────────────
+
+async def _captured_checkout_form(**settings_overrides):
+    captured = {}
+
+    class _Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"id": "cs_test_x", "url": "https://checkout.stripe.com/c/pay/cs_test_x"}
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, data=None, headers=None):
+            captured.update(data); captured["_url"] = url
+            return _Resp()
+
+    with patch.object(sc, "get_settings", return_value=_s(**settings_overrides)), patch.object(sc.httpx, "AsyncClient", _Client):
+        await sc.create_checkout("11111111-1111-1111-1111-111111111111", "a@b.dev")
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_checkout_request_defaults_are_unchanged():
+    form = await _captured_checkout_form()
+    assert form["_url"] == "https://api.stripe.com/v1/checkout/sessions"
+    assert form["line_items[0][price_data][unit_amount]"] == "399" and form["line_items[0][price_data][currency]"] == "gbp"
+    assert "managed_payments[enabled]" not in form and "line_items[0][price_data][product_data][tax_code]" not in form
+
+
+@pytest.mark.asyncio
+async def test_checkout_request_can_carry_a_tax_code_or_opt_out_of_managed_payments():
+    form = await _captured_checkout_form(studymind_stripe_tax_code="txcd_10000000")
+    assert form["line_items[0][price_data][product_data][tax_code]"] == "txcd_10000000"
+    form = await _captured_checkout_form(studymind_stripe_managed_payments=False)
+    assert form["managed_payments[enabled]"] == "false"
+    form = await _captured_checkout_form(studymind_stripe_tax_code="not-a-tax-code")
+    assert "line_items[0][price_data][product_data][tax_code]" not in form       # only well-formed codes are ever sent
+
+
+@pytest.mark.asyncio
+async def test_price_and_identity_are_fixed_by_the_server():
+    form = await _captured_checkout_form()
+    assert form["client_reference_id"] == "11111111-1111-1111-1111-111111111111"
+    assert form["metadata[studymind_user_id]"] == form["client_reference_id"]
+    assert form["metadata[studymind_product]"] == "plus_28d_v1" and form["mode"] == "payment"
