@@ -80,6 +80,13 @@ def courses(client, api_key, fakes):
     return ("js", "py", "react")
 
 
+@pytest.fixture(autouse=True)
+def _pinned_chat_model(monkeypatch):
+    """Reservations (and so the budget arithmetic below) depend on the chat model's price. Pin it, so the result does not
+    change with a developer's local .env (e.g. OPENAI_CHAT_MODEL=gpt-4o) or a different default."""
+    monkeypatch.setattr(settings, "openai_chat_model", "gpt-4.1-mini")
+
+
 @pytest.fixture
 def limits(monkeypatch):
     """Set pass limits for policies created after this point (they're frozen onto each policy)."""
