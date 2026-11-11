@@ -15,6 +15,8 @@ from app.config import get_settings
 from app.db.models import StudyMindEntitlement, StudyMindUsageCounter, User
 from app.usage.studymind_quota import FREE_LIMITS
 
+from app.billing.stripe_checkout import checkout_configured
+
 router = APIRouter(prefix="/api", tags=["entitlements"])
 
 
@@ -53,7 +55,8 @@ async def my_entitlements(
                     for name, limit in FREE_LIMITS.items()}
         return {"plan": "free", "expires_at": None, "features": features,
                 "allowances": _web_allowances(features),
-                "enforcement_enabled": get_settings().studymind_quota_enabled}
+                "enforcement_enabled": get_settings().studymind_quota_enabled,
+                "purchase_available": checkout_configured()}
 
     # Multiple overlapping purchases are not summed until the billing policy is finalised.
     entitlement = rows[0]
@@ -72,4 +75,5 @@ async def my_entitlements(
         "plan": "plus", "expires_at": entitlement.expires_at.isoformat(),
         "features": features, "allowances": _web_allowances(features),
         "enforcement_enabled": get_settings().studymind_quota_enabled,
+        "purchase_available": checkout_configured(),
     }

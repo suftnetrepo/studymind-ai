@@ -7,12 +7,43 @@ from app.config import get_settings
 from app.usage.studymind_quota import PLUS_PRICE_GBP_PENCE
 
 
+STRIPE_API = "https://api.stripe.com"
+_LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+_LOCAL_ENVS = {"development", "test"}
+
+
+def stripe_api_base() -> str:
+    """The Stripe API origin. The real API always; a loopback stand-in only outside staging and production."""
+    s = get_settings()
+    base = getattr(s, "studymind_stripe_api_base", STRIPE_API)
+    base = (base if isinstance(base, str) and base else STRIPE_API).rstrip("/")
+    if base == STRIPE_API:
+        return base
+    parts = urlsplit(base)
+    if parts.scheme in ("http", "https") and parts.hostname in _LOOPBACK and s.app_env in _LOCAL_ENVS:
+        return base
+    raise RuntimeError("Stripe API base override refused (loopback and development/test only)")
+
+
+def _return_url_ok(url: str, app_env: str) -> bool:
+    parts = urlsplit(url)
+    if not parts.netloc:
+        return False
+    if parts.scheme == "https":
+        return True
+    return parts.scheme == "http" and parts.hostname in _LOOPBACK and app_env in _LOCAL_ENVS   # local development only
+
+
 def checkout_configured() -> bool:
     s = get_settings()
     urls = (s.studymind_checkout_success_url, s.studymind_checkout_cancel_url)
+    try:
+        stripe_api_base()
+    except RuntimeError:
+        return False
     return bool(s.studymind_billing_enabled and s.studymind_stripe_secret_key.startswith("sk_test_")
                 and s.studymind_stripe_webhook_secret.startswith("whsec_")
-                and all(urlsplit(url).scheme == "https" and urlsplit(url).netloc for url in urls))
+                and all(_return_url_ok(url, s.app_env) for url in urls))
 
 
 async def create_checkout(user_id: str, email: str) -> dict:
@@ -36,7 +67,7 @@ async def create_checkout(user_id: str, email: str) -> dict:
     }
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(
-            "https://api.stripe.com/v1/checkout/sessions",
+            f"{stripe_api_base()}/v1/checkout/sessions",
             data=data,
             headers={"Authorization": f"Bearer {s.studymind_stripe_secret_key}"},
         )
@@ -45,3 +76,15 @@ async def create_checkout(user_id: str, email: str) -> dict:
     if not result.get("id") or not result.get("url"):
         raise RuntimeError("Stripe did not return a Checkout Session")
     return {"checkout_session_id": result["id"], "checkout_url": result["url"]}
+
+
+async def has_active_plus(db, user_id) -> bool:
+    """True when the user holds a currently active, unexpired Stripe-issued pass."""
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    from app.db.models import StudyMindEntitlement
+    now = datetime.now(timezone.utc)
+    row = (await db.execute(select(StudyMindEntitlement.id).where(
+        StudyMindEntitlement.user_id == user_id, StudyMindEntitlement.status == "active",
+        StudyMindEntitlement.starts_at <= now, StudyMindEntitlement.expires_at > now).limit(1))).first()
+    return row is not None

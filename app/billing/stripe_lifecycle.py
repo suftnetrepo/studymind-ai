@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.billing.stripe_checkout import stripe_api_base
 from app.db.models import StudyMindEntitlement
 from app.billing.stripe_webhook import InvalidStripeWebhook
 
@@ -16,7 +17,7 @@ async def retrieve_payment_intent(payment_intent_id: str) -> dict:
     settings = get_settings()
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.get(
-            f"https://api.stripe.com/v1/payment_intents/{payment_intent_id}",
+            f"{stripe_api_base()}/v1/payment_intents/{payment_intent_id}",
             params={"expand[]": "latest_charge"},
             headers={"Authorization": f"Bearer {settings.studymind_stripe_secret_key}"},
         )

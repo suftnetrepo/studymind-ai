@@ -17,6 +17,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
+from app.billing.stripe_checkout import stripe_api_base
 from app.db.models import StudyMindEntitlement
 from app.usage.studymind_quota import PLUS_DURATION_DAYS, PLUS_LIMITS, PLUS_PRICE_GBP_PENCE
 
@@ -60,7 +61,7 @@ async def retrieve_paid_checkout(session_id: str) -> dict:
     settings = get_settings()
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.get(
-            f"https://api.stripe.com/v1/checkout/sessions/{session_id}",
+            f"{stripe_api_base()}/v1/checkout/sessions/{session_id}",
             headers={"Authorization": f"Bearer {settings.studymind_stripe_secret_key}"},
         )
     response.raise_for_status()

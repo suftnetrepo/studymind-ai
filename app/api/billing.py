@@ -7,7 +7,7 @@ from app.config import get_settings
 from app.billing.stripe_webhook import (
     InvalidStripeWebhook, verify_stripe_signature, retrieve_paid_checkout, activate_paid_checkout,
 )
-from app.billing.stripe_checkout import checkout_configured, create_checkout
+from app.billing.stripe_checkout import checkout_configured, create_checkout, has_active_plus
 from app.billing.stripe_lifecycle import retrieve_payment_intent, reconcile_payment_reversal
 from app.logging_config import get_logger
 
@@ -19,6 +19,10 @@ log = get_logger(__name__)
 async def checkout(current_user: User = Depends(require_auth)):
     if not checkout_configured():
         raise HTTPException(status_code=503, detail="StudyMind Plus checkout is not available yet.")
+    # One pass at a time: overlapping purchases are not summed, so a user who already has Plus must not be charged again.
+    async with AsyncSessionLocal() as db:
+        if await has_active_plus(db, current_user.id):
+            raise HTTPException(status_code=409, detail="You already have an active StudyMind Plus pass.")
     try:
         return await create_checkout(str(current_user.id), current_user.email)
     except Exception as exc:

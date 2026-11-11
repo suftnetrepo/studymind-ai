@@ -130,6 +130,9 @@ class Settings(BaseSettings):
     studymind_billing_enabled: bool = False
     studymind_stripe_secret_key: str = ""
     studymind_stripe_webhook_secret: str = ""
+    # Stripe API origin. Only the default is accepted in production; a loopback override exists so local tests can use a
+    # recording stand-in (tests/fixtures-style) instead of the real API. Anything else makes checkout fail closed.
+    studymind_stripe_api_base: str = "https://api.stripe.com"
     studymind_checkout_success_url: str = ""
     studymind_checkout_cancel_url: str = ""
 
