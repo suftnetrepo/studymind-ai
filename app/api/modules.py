@@ -39,7 +39,8 @@ from app.db.models import (
 from app.db.schemas import (
     DocumentUploadResponse, DocumentVersionSchema,
     EnrolRequest, EnrolmentSchema,
-    ModuleCreate, ModuleDetailSchema, ModuleDocumentSchema, ModuleSchema,
+    ModuleCreate, ModuleDetailSchema, ModuleDocumentSchema, ModuleOutline, ModuleSchema,
+    OutlineDocument, OutlineSection,
     SemesterCreate, SemesterSchema,
     WeekCreate, WeekSchema,
 )
@@ -785,6 +786,9 @@ async def _ingest_module_document(
                 if result["status"] == "failed" else None
             )
             doc_obj.indexed_at  = result["indexed_at"]
+            if result.get("sections"):
+                # Detected chapters/sections (see app/ingestion/structure.py). A new dict, so the JSONB change is saved.
+                doc_obj.doc_metadata = {**(doc_obj.doc_metadata or {}), "sections": result["sections"]}
             session.commit()
         engine.dispose()
 
@@ -954,6 +958,43 @@ async def create_enrolment_code(
     ))
     await db.commit()
     return {"code": code_str, "module_id": str(module_id)}
+
+
+@router.get("/modules/{module_id}/outline", response_model=ModuleOutline)
+async def module_outline(
+    module_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    """
+    Chapters/sections detected in the module's documents when they were uploaded, for picking what Quiz, Flashcards and Summary
+    should cover. Same visibility as the document list: class material plus the caller's own personal notes, latest versions only.
+    """
+    await _get_accessible_module(module_id, current_user, db)
+    rows = (await db.execute(
+        select(Document.id, Document.filename, Document.doc_metadata)
+        .join(ModuleDocument, ModuleDocument.document_id == Document.id)
+        .where(ModuleDocument.module_id == module_id, ModuleDocument.is_latest == True, Document.status == "indexed")
+        .where(
+            (ModuleDocument.visibility == "class") |
+            ((ModuleDocument.visibility == "personal") & (Document.owner_id == current_user.id))
+        )
+        .order_by(ModuleDocument.created_at.asc())
+    )).all()
+    documents = []
+    for doc_id, filename, meta in rows:
+        sections = []
+        for sec in ((meta or {}).get("sections") or [])[:200]:
+            try:
+                idx = int(sec["i"])
+                sections.append(OutlineSection(ref=f"{doc_id}:{idx}", index=idx, title=str(sec["title"])[:120],
+                                               level=min(max(int(sec.get("level") or 1), 1), 3),
+                                               page=int(sec["page"]) if sec.get("page") else None))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if sections:
+            documents.append(OutlineDocument(document_id=doc_id, filename=filename, sections=sections))
+    return ModuleOutline(documents=documents)
 
 
 @router.get("/modules/{module_id}/documents", response_model=list[ModuleDocumentSchema])

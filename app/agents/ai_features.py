@@ -32,6 +32,8 @@ def _retrieve_context(
     document_id: str | None = None,
     student_id: str         = "",
     top_k: int              = 20,
+    chunk_ranges: list[tuple[str, int, int]] | None = None,
+    char_budget: int        = 12000,
 ) -> tuple[str, int]:
     """
     Retrieve relevant chunks for a module/week/document.
@@ -39,35 +41,47 @@ def _retrieve_context(
     For summarisation we use a high top_k to get comprehensive coverage.
     """
     embed_model = get_embed_model()
-    scope       = SearchScope(
-        student_id=student_id,
-        module_id=module_id,
-        week_id=week_id,
-        current_semester_only=False,  # features should work across semesters
-        latest_only=True,
-        include_class=True,
-        include_personal=True,
-    )
 
-    retriever = ScopedHybridRetriever(
-        embed_model=embed_model,
-        scope=scope,
-        top_k=top_k,
-        score_threshold=0.0,  # for features, include all content not just top hits
-    )
+    def _search(ranges: list[tuple[str, int, int]], k: int):
+        scope = SearchScope(
+            student_id=student_id,
+            module_id=module_id,
+            week_id=week_id,
+            current_semester_only=False,  # features should work across semesters
+            latest_only=True,
+            include_class=True,
+            include_personal=True,
+            chunk_ranges=ranges,
+        )
+        retriever = ScopedHybridRetriever(
+            embed_model=embed_model,
+            scope=scope,
+            top_k=k,
+            score_threshold=0.0,  # for features, include all content not just top hits
+        )
+        return retriever.retrieve(QueryBundle(query_str=query))
 
-    query_bundle     = QueryBundle(query_str=query)
-    nodes_with_score = retriever.retrieve(query_bundle)
+    def _format(nodes) -> list[str]:
+        parts = []
+        for nws in nodes:
+            meta = nws.node.metadata
+            parts.append(f"[{meta.get('filename', 'doc')}, chunk {meta.get('chunk_index', 0)}]\n{nws.node.text}")
+        return parts
 
-    parts = []
-    for nws in nodes_with_score:
-        meta   = nws.node.metadata
-        fname  = meta.get("filename", "doc")
-        cidx   = meta.get("chunk_index", 0)
-        parts.append(f"[{fname}, chunk {cidx}]\n{nws.node.text}")
+    if not chunk_ranges:
+        nodes_with_score = _search([], top_k)
+        return "\n\n".join(_format(nodes_with_score)), len(nodes_with_score)
 
-    context = "\n\n".join(parts)
-    return context, len(nodes_with_score)
+    # Chosen chapters/sections: search each one on its own so every one is represented, and share the text budget between them.
+    per_k      = max(2, top_k // len(chunk_ranges))
+    per_chars  = max(1500, char_budget // len(chunk_ranges))
+    blocks, total = [], 0
+    for rng in chunk_ranges:
+        nodes = _search([rng], per_k)
+        total += len(nodes)
+        if nodes:
+            blocks.append("\n\n".join(_format(nodes))[:per_chars])
+    return "\n\n".join(blocks), total
 
 
 def _with_topic_focus(prompt: str, topic: str | None) -> str:
@@ -181,6 +195,7 @@ def generate_quiz(
     title: str              = "Quiz",
     topic: str | None       = None,
     complexity: str         = "normal",
+    chunk_ranges: list[tuple[str, int, int]] | None = None,
 ) -> list[dict]:
     """
     QUIZ-01/02/03: Generate quiz questions from module/week/document content.
@@ -194,6 +209,7 @@ def generate_quiz(
         document_id=document_id,
         student_id=student_id,
         top_k=min(question_count * 3, 30),
+        chunk_ranges=chunk_ranges,
     )
 
     if not context:
@@ -398,6 +414,7 @@ def generate_flashcards(
     max_cards: int          = 20,
     topic: str | None       = None,
     complexity: str         = "normal",
+    chunk_ranges: list[tuple[str, int, int]] | None = None,
 ) -> list[dict]:
     """
     FLASH-01/02: Generate flashcard deck from module/week/document content.
@@ -411,6 +428,7 @@ def generate_flashcards(
         document_id=document_id,
         student_id=student_id,
         top_k=min(max_cards * 2, 40),
+        chunk_ranges=chunk_ranges,
     )
 
     if not context:
@@ -491,6 +509,7 @@ def generate_summary(
     scope: str              = "document",
     topic: str | None       = None,
     complexity: str         = "normal",
+    chunk_ranges: list[tuple[str, int, int]] | None = None,
 ) -> tuple[str, int]:
     """
     SUM-01/02: Generate a structured Markdown summary.
@@ -509,6 +528,7 @@ def generate_summary(
         document_id=document_id,
         student_id=student_id,
         top_k=40,   # high top_k — we want comprehensive coverage for summaries
+        chunk_ranges=chunk_ranges,
     )
 
     if not context:

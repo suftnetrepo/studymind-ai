@@ -45,6 +45,17 @@ def _extract_text(filename: str, content: bytes) -> str:
     raise ValueError(f"Unsupported file type: {ext}")
 
 
+def _extract_with_sections(filename: str, content: bytes):
+    """(text, sections). Falls back to plain extraction if structure detection fails, so indexing never depends on it."""
+    try:
+        from app.ingestion.structure import extract_with_structure
+        return extract_with_structure(filename, content)
+    except ValueError:
+        raise
+    except Exception:
+        return _extract_text(filename, content), []
+
+
 def _chunk_text(text: str, filename: str, document_id: str):
     settings = get_settings()
     splitter = SentenceSplitter(
@@ -102,11 +113,16 @@ class DocumentIngestor:
         log.info("ingestion_start", filename=filename, doc_id=document_id)
 
         try:
-            text = _extract_text(filename, content)
+            text, found_sections = _extract_with_sections(filename, content)
             if not text.strip():
                 raise ValueError("Extracted text is empty — file may be image-only or corrupt")
 
             nodes = _chunk_text(text, filename, document_id)
+            try:
+                from app.ingestion.structure import map_chunks
+                sections = map_chunks(found_sections, [(n.start_char_idx, n.end_char_idx) for n in nodes])
+            except Exception:
+                sections = []   # structure is optional; never let it fail an upload
             log.info("chunks_created", count=len(nodes), doc_id=document_id)
 
             texts_to_embed = [node.get_content() for node in nodes]
@@ -175,6 +191,7 @@ class DocumentIngestor:
                 "error":       None,
                 "chunks":      db_chunks,
                 "indexed_at":  datetime.now(timezone.utc),
+                "sections":    sections,
             }
 
         except Exception as exc:
@@ -185,6 +202,7 @@ class DocumentIngestor:
                 "error":       "Document indexing failed. Please try again or contact support.",
                 "chunks":      [],
                 "indexed_at":  None,
+                "sections":    [],
             }
 
 
