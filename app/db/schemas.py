@@ -434,6 +434,7 @@ class ModuleSchema(BaseModel):
     student_count: int = 0
     progress: int = Field(default=0, ge=0, le=100)
     emoji: Optional[str] = None
+    enrolled_at: Optional[datetime] = None   # the caller's own enrolment date (list endpoint only; None for modules they own)
 
 
 class ModuleDetailSchema(ModuleSchema):
