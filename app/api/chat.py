@@ -27,6 +27,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.features import _resolve_section_ranges
+from app.api.modules import _get_accessible_module
 from app.activity.tracker import log_activity
 from app.agents.rag_pipeline import COMPLEXITY_MODIFIERS, get_pipeline
 from app.auth.dependencies import require_auth
@@ -38,6 +40,7 @@ from app.db.schemas import (
     SessionCreate, SessionSchema, SessionWithMessages, SessionWithScope,
 )
 from app.logging_config import get_logger
+from app.usage.studymind_guard import metered_generation
 
 log    = get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["chat"])
@@ -121,14 +124,23 @@ async def chat(
     QA-01: Ask a question. Returns grounded answer with citations and scope indicator.
     Supports /csc109/week3 shortcuts in the message prefix.
     """
+    if req.module_id is not None:
+        await _get_accessible_module(req.module_id, current_user, db)
+
+    if req.module_id is None:
+        raise HTTPException(status_code=422, detail="A module is required for grounded AI chat")
+
     session = await _get_or_create_session(
         req.session_id, req.module_id, current_user, db
     )
     history = await _load_history(session.id, db)
 
-    module_id_str, course_code, semester_label = await _resolve_module_scope(
+    module_id_str, _course_code, semester_label = await _resolve_module_scope(
         req.module_id, db
     )
+    course_code = None  # Never broaden a module-scoped retrieval to a shared course code.
+
+    chunk_ranges = await _resolve_section_ranges(req, current_user, db)
 
     settings = get_settings()
     pipeline = get_pipeline()
@@ -143,18 +155,21 @@ async def chat(
     await db.flush()
 
     # Run scoped RAG query
-    result = pipeline.query(
-        question=req.message,
-        history=history,
-        top_k=req.top_k or settings.top_k_retrieval,
-        student_id=str(current_user.id),
-        module_id=module_id_str,
-        course_code=course_code,
-        scope_mode=req.scope_mode,
-        include_archived=req.include_archived,
-        semester_label=semester_label,
-        complexity=req.complexity,
-    )
+    async with metered_generation(current_user.id, "chat"):
+        result = pipeline.query(
+            question=req.message,
+            history=history,
+            top_k=req.top_k or settings.top_k_retrieval,
+            student_id=str(current_user.id),
+            module_id=module_id_str,
+            course_code=course_code,
+            scope_mode=req.scope_mode,
+            include_archived=req.include_archived,
+            semester_label=semester_label,
+            complexity=req.complexity,
+            chunk_ranges=chunk_ranges,
+            topic=req.topic,
+        )
 
     # Save assistant message with full metadata
     bot_msg = ChatMessage(
@@ -200,14 +215,27 @@ async def chat_stream(
     QA-03: Streaming chat via SSE.
     Events: session → token (×N) → done (with sources + scope)
     """
+    # Do not allow the streaming endpoint to bypass paid/free quotas.
+    # Re-enable after streaming reservations and disconnect compensation are tested.
+    if get_settings().studymind_quota_enabled:
+        raise HTTPException(status_code=503, detail="Streaming chat is temporarily unavailable; use regular chat.")
+    if req.module_id is not None:
+        await _get_accessible_module(req.module_id, current_user, db)
+
+    if req.module_id is None:
+        raise HTTPException(status_code=422, detail="A module is required for grounded AI chat")
+
     session = await _get_or_create_session(
         req.session_id, req.module_id, current_user, db
     )
     history = await _load_history(session.id, db)
 
-    module_id_str, course_code, semester_label = await _resolve_module_scope(
+    module_id_str, _course_code, semester_label = await _resolve_module_scope(
         req.module_id, db
     )
+    course_code = None  # Never broaden a module-scoped retrieval to a shared course code.
+
+    chunk_ranges = await _resolve_section_ranges(req, current_user, db)
 
     pipeline   = get_pipeline()
     settings   = get_settings()
@@ -239,6 +267,8 @@ async def chat_stream(
                 include_archived=req.include_archived,
                 semester_label=semester_label,
                 complexity=req.complexity,
+                chunk_ranges=chunk_ranges,
+                topic=req.topic,
             )
 
             # Send scope before first token (SRCH-05)
@@ -419,29 +449,30 @@ async def extract_text_from_image(
     if len(body.image_base64) > _MAX_IMAGE_B64:
         raise HTTPException(status_code=413, detail="Image is too large")
 
-    try:
-        resp = await _openai_client().chat.completions.create(
-            model=get_settings().openai_chat_model,
-            max_tokens=4096,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {
-                        "url": f"data:{body.mime_type};base64,{body.image_base64}",
-                    }},
-                    {"type": "text", "text": (
-                        "Extract all the text from this image exactly as it appears. "
-                        "If it is a question or problem, extract it completely. "
-                        "If it contains diagrams or equations, describe them clearly in text. "
-                        "Return only the extracted content, nothing else."
-                    )},
-                ],
-            }],
-        )
-        return {"text": (resp.choices[0].message.content or "").strip()}
-    except Exception as exc:
-        log.error("extract_image_failed", error=str(exc))
-        raise HTTPException(status_code=502, detail="Could not read the image")
+    async with metered_generation(current_user.id, "chat"):
+        try:
+            resp = await _openai_client().chat.completions.create(
+                model=get_settings().openai_chat_model,
+                max_tokens=4096,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {
+                            "url": f"data:{body.mime_type};base64,{body.image_base64}",
+                        }},
+                        {"type": "text", "text": (
+                            "Extract all the text from this image exactly as it appears. "
+                            "If it is a question or problem, extract it completely. "
+                            "If it contains diagrams or equations, describe them clearly in text. "
+                            "Return only the extracted content, nothing else."
+                        )},
+                    ],
+                }],
+            )
+            return {"text": (resp.choices[0].message.content or "").strip()}
+        except Exception as exc:
+            log.error("extract_image_failed", error=str(exc))
+            raise HTTPException(status_code=502, detail="Could not read the image")
 
 
 @router.post("/chat/transcribe")
@@ -505,8 +536,9 @@ async def general_chat(
         complexity=COMPLEXITY_MODIFIERS.get(req.complexity, COMPLEXITY_MODIFIERS["normal"])
     )
     started = time.monotonic()
-    try:
-        resp = await _openai_client().chat.completions.create(
+    async with metered_generation(current_user.id, "chat"):
+        try:
+            resp = await _openai_client().chat.completions.create(
             model=get_settings().openai_chat_model,
             max_tokens=1500,
             messages=[
@@ -515,9 +547,9 @@ async def general_chat(
                 {"role": "user", "content": req.message},
             ],
         )
-    except Exception as e:
-        log.error("general_chat_failed", error=str(e))
-        raise HTTPException(status_code=502, detail="The AI service is unavailable. Try again.")
+        except Exception as e:
+            log.error("general_chat_failed", error_type=type(e).__name__)
+            raise HTTPException(status_code=502, detail="The AI service is unavailable. Try again.")
 
     answer = (resp.choices[0].message.content or "").strip()
     latency_ms = int((time.monotonic() - started) * 1000)

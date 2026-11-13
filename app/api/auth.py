@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import asyncio
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -27,7 +28,7 @@ from app.auth.security import (
 )
 from app.config import get_settings
 from app.db.engine import get_db
-from app.db.models import RefreshToken, User
+from app.db.models import RefreshToken, User, PasswordResetToken
 from app.db.schemas import (
     ForgotPasswordRequest,
     LoginRequest,
@@ -38,6 +39,8 @@ from app.db.schemas import (
     UserUpdateRequest,
 )
 from app.logging_config import get_logger
+from app.auth.recovery import new_recovery_token, hash_recovery_token, recovery_expiry, recovery_configured, send_recovery_email
+from pydantic import BaseModel, EmailStr, Field
 
 log    = get_logger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -114,28 +117,87 @@ def _throttle(key: str, limit: int, window_s: int = 3600) -> bool:
 async def forgot_password(
     body: ForgotPasswordRequest,
     request: Request,
+):
+    """Fail closed: legacy email-only password changes are unsafe.
+
+    A verified, single-use recovery flow must replace this endpoint before
+    password recovery can be re-enabled. Never change credentials here.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail="Password recovery is temporarily unavailable. Please contact support.",
+    )
+
+
+class RecoveryRequest(BaseModel):
+    email: EmailStr
+
+
+class RecoveryConfirm(BaseModel):
+    token: str = Field(min_length=30, max_length=256)
+    new_password: str = Field(min_length=8, max_length=128)
+
+
+@router.post("/password-recovery/request", status_code=202)
+async def request_password_recovery(
+    body: RecoveryRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    """Email a one-time reset link without revealing account existence."""
+    if not recovery_configured():
+        raise HTTPException(status_code=503, detail="Password recovery is temporarily unavailable.")
     ip = request.client.host if request.client else "unknown"
     email = body.email.lower()
-    if not (_throttle(f"ip:{ip}", 20) and _throttle(f"email:{email}", 5)):
-        raise HTTPException(status_code=429, detail="Too many attempts. Please try again later.")
+    if not (_throttle(f"recovery-ip:{ip}", 10) and _throttle(f"recovery-email:{email}", 3)):
+        raise HTTPException(status_code=429, detail="Too many attempts. Please try later.")
+    user = (await db.execute(select(User).where(User.email == email, User.is_active == True))).scalar_one_or_none()
+    if user is not None:
+        raw, digest = new_recovery_token()
+        db.add(PasswordResetToken(user_id=user.id, token_hash=digest, expires_at=recovery_expiry(), used=False))
+        await db.commit()
+        try:
+            await asyncio.to_thread(send_recovery_email, user.email, raw)
+        except Exception as exc:
+            log.error("recovery_delivery_failed", error_type=type(exc).__name__)
+    return {"message": "If an eligible account exists, a reset link will be sent."}
 
-    user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=404, detail="No account found with that email.")
-    if user.role != "self_learner":
-        raise HTTPException(
-            status_code=403,
-            detail="This account type can't reset its password in the app. Please contact support.",
-        )
 
+@router.post("/password-recovery/confirm", status_code=204)
+async def confirm_password_recovery(
+    body: RecoveryConfirm,
+    db: AsyncSession = Depends(get_db),
+):
+    """Consume the hashed token once, change password, revoke all refresh tokens."""
+    if not recovery_configured():
+        raise HTTPException(status_code=503, detail="Password recovery is temporarily unavailable.")
+    if not any(c.isupper() for c in body.new_password) or not any(c.isdigit() for c in body.new_password):
+        raise HTTPException(status_code=422, detail="Password requires an uppercase letter and a digit.")
+    token = (await db.execute(select(PasswordResetToken).where(
+        PasswordResetToken.token_hash == hash_recovery_token(body.token),
+    ).with_for_update())).scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if token is None or token.used or token.expires_at < now:
+        raise HTTPException(status_code=400, detail="Reset link is invalid or expired.")
+    user = (await db.execute(select(User).where(User.id == token.user_id).with_for_update())).scalar_one_or_none()
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=400, detail="Reset link is invalid or expired.")
     user.password_hash = hash_password(body.new_password)
-    from sqlalchemy import delete as sa_delete
-    await db.execute(sa_delete(RefreshToken).where(RefreshToken.user_id == user.id))
+    token.used = True
+    # Invalidate all other outstanding reset links for this account.
+    await db.execute(
+        PasswordResetToken.__table__.update().where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.used == False,
+        ).values(used=True)
+    )
+    # Revoke all refresh sessions; already-issued short-lived access JWTs remain
+    # valid until expiry (currently 60 minutes).
+    await db.execute(
+        RefreshToken.__table__.update().where(RefreshToken.user_id == user.id).values(revoked=True)
+    )
     await db.commit()
-    log.info("password_reset_simple", user_id=str(user.id))
-    return {"ok": True}
+    log.info("password_recovered", user_id=str(user.id))
 
 
 # ── AUTH-02: Login ─────────────────────────────────────────────────────────
@@ -331,3 +393,38 @@ async def delete_me(
     await db.delete(current_user)
     await db.commit()
     log.info("account_deleted", user_id=str(current_user.id), documents=len(doc_ids))
+
+
+@router.get("/learning-overview")
+async def learning_overview(
+    current_user: User = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """Authenticated summary of the caller's account and learning modules.
+
+    Additive endpoint for Web integration. Does not mutate existing records.
+    """
+    from sqlalchemy import func
+    from app.db.models import Enrolment, Module
+
+    owned_count = await db.scalar(
+        select(func.count(Module.id)).where(Module.owner_id == current_user.id)
+    )
+    enrolled_count = await db.scalar(
+        select(func.count(Enrolment.id))
+        .join(Module, Module.id == Enrolment.module_id)
+        .where(
+            Enrolment.student_id == current_user.id,
+            Enrolment.status == "active",
+            Module.owner_id != current_user.id,
+        )
+    )
+    return {
+        "user": {
+            "id": str(current_user.id),
+            "email": current_user.email,
+            "full_name": current_user.full_name,
+            "role": current_user.role,
+        },
+        "modules": {"owned": owned_count or 0, "enrolled": enrolled_count or 0},
+    }

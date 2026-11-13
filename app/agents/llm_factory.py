@@ -26,6 +26,8 @@ def get_llm() -> OpenAI:
         api_key=s.openai_api_key,
         temperature=0.1,
         max_tokens=2048,
+        max_retries=s.openai_llm_max_retries,
+        timeout=s.openai_timeout_seconds,
     )
 
 
@@ -38,6 +40,8 @@ def get_embed_model() -> OpenAIEmbedding:
         api_key=s.openai_api_key,
         embed_batch_size=32,
         dimensions=s.openai_embedding_dimension,
+        max_retries=s.openai_embed_max_retries,
+        timeout=s.openai_timeout_seconds,
     )
 
 

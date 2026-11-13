@@ -144,6 +144,7 @@ def _build_scope_from_request(
     include_archived: bool    = False,
     semester_id: str | None   = None,
     week_number: int | None   = None,
+    chunk_ranges: list[tuple[str, int, int]] | None = None,
 ) -> SearchScope:
     """
     SRCH-01/02: Translate chat request params into a SearchScope.
@@ -157,6 +158,8 @@ def _build_scope_from_request(
         current_semester_only=not include_archived,
         latest_only=True,
     )
+    if chunk_ranges:
+        scope.chunk_ranges = list(chunk_ranges)
 
     if scope_mode == "class_only":
         scope.include_class    = True
@@ -275,6 +278,8 @@ class RAGPipeline:
         week_number: int | None     = None,
         complexity: str             = "normal",
         fallback_top_k: int         = 0,
+        chunk_ranges: list[tuple[str, int, int]] | None = None,
+        topic: str | None           = None,
     ) -> dict:
         """
         Synchronous scoped RAG query.
@@ -303,10 +308,11 @@ class RAGPipeline:
             include_archived=include_archived,
             semester_id=semester_id,
             week_number=week_number,
+            chunk_ranges=chunk_ranges,
         )
 
         retriever        = self._make_retriever(scope, top_k or settings.top_k_retrieval)
-        query_bundle     = QueryBundle(query_str=question)
+        query_bundle     = QueryBundle(query_str=f"{topic}: {question}" if topic else question)
         nodes_with_score = retriever.retrieve(query_bundle)
 
         fallback_used = False
@@ -405,6 +411,8 @@ class RAGPipeline:
         semester_label: str | None  = None,
         week_number: int | None     = None,
         complexity: str             = "normal",
+        chunk_ranges: list[tuple[str, int, int]] | None = None,
+        topic: str | None           = None,
     ) -> tuple[Any, list[SourceCitation], ScopeIndicator]:
         """
         Returns (stream, citations, scope_indicator).
@@ -421,10 +429,11 @@ class RAGPipeline:
             include_archived=include_archived,
             semester_id=semester_id,
             week_number=week_number,
+            chunk_ranges=chunk_ranges,
         )
 
         retriever        = self._make_retriever(scope, top_k or settings.top_k_retrieval)
-        query_bundle     = QueryBundle(query_str=question)
+        query_bundle     = QueryBundle(query_str=f"{topic}: {question}" if topic else question)
         nodes_with_score = retriever.retrieve(query_bundle)
 
         context_parts = []

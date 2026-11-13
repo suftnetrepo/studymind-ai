@@ -49,6 +49,10 @@ class SearchScope:
     # Multiple module IDs (for "all my modules" search)
     module_ids: list[str] = field(default_factory=list)
 
+    # Restrict to chunk ranges of specific documents: (document_id, first_chunk_index, last_chunk_index).
+    # Always ANDed with every other filter above, so it can only narrow a search, never widen it.
+    chunk_ranges: list[tuple[str, int, int]] = field(default_factory=list)
+
     def build_filter(self) -> str:
         """Build a Typesense filter_by string from the scope."""
         filters: list[str] = []
@@ -92,6 +96,10 @@ class SearchScope:
             filters.append("visibility:=class")
         elif self.include_personal and self.student_id:
             filters.append(f"visibility:=personal && owner_id:={self.student_id}")
+
+        if self.chunk_ranges:
+            clauses = [f"(document_id:={doc} && chunk_index:[{int(a)}..{int(b)}])" for doc, a, b in self.chunk_ranges]
+            filters.append("(" + " || ".join(clauses) + ")")
 
         return " && ".join(filters) if filters else ""
 

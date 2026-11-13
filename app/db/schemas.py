@@ -519,6 +519,11 @@ class ScopedChatRequest(BaseModel):
     # Explanation depth: simple ("explain like I'm 5") | normal | expert
     complexity: str = Field(default="normal", pattern="^(simple|normal|expert)$")
 
+    # Optional focus (non-breaking): chapters "document_id:index" from GET /modules/{id}/outline, and/or a topic that steers retrieval
+    sections: Optional[list[str]] = Field(default=None, max_length=12)
+    balanced: bool = False
+    topic: Optional[str] = Field(default=None, max_length=200)
+
     # SRCH-03/04: /csc109/week3 shortcut embedded in message is auto-detected
     # No extra field needed — parser reads message prefix
 
@@ -582,6 +587,12 @@ class QuizGenerateRequest(BaseModel):
     title:          Optional[str] = Field(default=None, max_length=255)
     topic:          Optional[str] = Field(default=None, max_length=200,
                                           description="Topic to focus on, e.g. 'Python data types'")
+    sections:    Optional[list[str]] = Field(
+        default=None, max_length=12,
+        description="Optional chapters/sections to focus on, as 'document_id:index' references taken from GET /api/modules/{id}/outline")
+    balanced:    bool = Field(
+        default=False,
+        description="With no sections chosen: spread the generation evenly across the module's detected chapters")
 
     @field_validator("question_type")
     @classmethod
@@ -672,6 +683,12 @@ class FlashcardGenerateRequest(BaseModel):
     max_cards:   int = Field(default=20, ge=5, le=50)
     topic:       Optional[str] = Field(default=None, max_length=200,
                                        description="Topic to focus on, e.g. 'Python data types'")
+    sections:    Optional[list[str]] = Field(
+        default=None, max_length=12,
+        description="Optional chapters/sections to focus on, as 'document_id:index' references taken from GET /api/modules/{id}/outline")
+    balanced:    bool = Field(
+        default=False,
+        description="With no sections chosen: spread the generation evenly across the module's detected chapters")
 
 
 class FlashcardSchema(BaseModel):
@@ -723,6 +740,12 @@ class SummariseRequest(BaseModel):
     )
     topic:       Optional[str] = Field(default=None, max_length=200,
                                        description="Topic to focus on, e.g. 'Python data types'")
+    sections:    Optional[list[str]] = Field(
+        default=None, max_length=12,
+        description="Optional chapters/sections to focus on, as 'document_id:index' references taken from GET /api/modules/{id}/outline")
+    balanced:    bool = Field(
+        default=False,
+        description="With no sections chosen: spread the generation evenly across the module's detected chapters")
 
     @field_validator("scope")
     @classmethod
@@ -744,3 +767,23 @@ class SummarySchema(BaseModel):
     content:          str
     source_doc_count: int
     created_at:       datetime
+
+
+# ── Document structure (chapters / sections) ───────────────────────────────
+
+class OutlineSection(BaseModel):
+    ref:   str            # "document_id:index" - what a generation request sends back in `sections`
+    index: int
+    title: str
+    level: int
+    page:  Optional[int] = None
+
+
+class OutlineDocument(BaseModel):
+    document_id: uuid.UUID
+    filename:    str
+    sections:    list[OutlineSection] = []
+
+
+class ModuleOutline(BaseModel):
+    documents: list[OutlineDocument] = []

@@ -80,6 +80,13 @@ def courses(client, api_key, fakes):
     return ("js", "py", "react")
 
 
+@pytest.fixture(autouse=True)
+def _pinned_chat_model(monkeypatch):
+    """Reservations (and so the budget arithmetic below) depend on the chat model's price. Pin it, so the result does not
+    change with a developer's local .env (e.g. OPENAI_CHAT_MODEL=gpt-4o) or a different default."""
+    monkeypatch.setattr(settings, "openai_chat_model", "gpt-4.1-mini")
+
+
 @pytest.fixture
 def limits(monkeypatch):
     """Set pass limits for policies created after this point (they're frozen onto each policy)."""
@@ -425,7 +432,36 @@ class TestFailuresAndBudget:
         p = policy_row(db)
         assert p.spent_micro_usd <= p.budget_micro_usd and p.reserved_micro_usd == 0
         assert ai.calls.count("chat") == expected_ok                # no AI calls once exhausted
-        assert status(client, api_key)["budget_exhausted"] is True
+
+        # Chat no longer fits, but the budget is only *exhausted* once not even the cheapest feature fits
+        # (quiz/flashcards reserve less than chat). Availability must match each feature's reservation exactly.
+        model = settings.openai_chat_model
+        cheapest = min(usage.reservation_micro_usd(f, model) for f in usage.FEATURES)
+        remaining = p.budget_micro_usd - p.spent_micro_usd
+        s = status(client, api_key)
+        for f in usage.FEATURES:
+            assert s["features"][f]["available"] is (remaining >= usage.reservation_micro_usd(f, model))
+        assert s["features"]["chat"]["available"] is False
+        assert s["budget_exhausted"] is (remaining < cheapest)
+        assert remaining >= cheapest and s["budget_exhausted"] is False   # this scenario leaves room for a quiz
+
+        # Keep spending with the cheapest-reservation feature until it is refused; the hard cap must still hold.
+        extra_ok = 0
+        while True:
+            r = gen(client, token, "quiz")
+            if r.status_code != 200:
+                assert r.json()["code"] == "budget_exhausted"
+                break
+            extra_ok += 1
+            assert extra_ok < 20, "budget never exhausted"
+        assert extra_ok >= 1
+        p = policy_row(db)
+        assert p.spent_micro_usd <= p.budget_micro_usd and p.reserved_micro_usd == 0
+        assert ai.calls.count("quiz") == extra_ok                   # the refused call never reached the AI
+        final = status(client, api_key)
+        assert usage.reservation_micro_usd("quiz", model) == cheapest   # quiz is the cheapest, so refusing it means exhausted
+        assert final["budget_exhausted"] is True
+        assert all(final["features"][f]["available"] is False for f in ("chat", "quiz", "flashcards"))
 
     def test_reservation_bounds_cover_the_real_model_output_cap(self):
         from app.agents.llm_factory import get_llm

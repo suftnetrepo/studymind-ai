@@ -165,7 +165,10 @@ def hybrid_search(
     # Try hybrid via multi_search POST — avoids URL length limit with 3072-dim vectors
     try:
         embedding_str = ",".join(f"{v:.6f}" for v in embedding)
-        hybrid_params = {**params, "vector_query": f"embedding:([{embedding_str}], k:{top_k})"}
+        # The vector candidate set must be deeper than the page size: a chunk that matches by keyword but is outside the
+        # vector top-k has no vector_distance, so it would otherwise have no real similarity to threshold on.
+        vector_k = max(top_k, settings.retrieval_vector_k)
+        hybrid_params = {**params, "vector_query": f"embedding:([{embedding_str}], k:{vector_k})"}
         payload = json.dumps({"searches": [hybrid_params]}).encode("utf-8")
         url     = f"{base_url}/multi_search?collection={COLLECTION_NAME}"
         req     = urllib.request.Request(
@@ -179,7 +182,10 @@ def hybrid_search(
             hits = data.get("results", [{}])[0].get("hits", [])
             if hits:
                 log.info("typesense_hybrid_search_ok", hits=len(hits))
-                return [{**h["document"], "score": 1 - h.get("vector_distance", 0.25)} for h in hits]
+                # Similarity is 1 - cosine distance. A hit with NO vector distance matched by keyword only; its similarity is
+                # unknown, so it scores 0.0 and the similarity threshold applies to it (it used to get an invented 0.75,
+                # which let any keyword hit bypass the threshold).
+                return [{**h["document"], "score": (1 - h["vector_distance"]) if h.get("vector_distance") is not None else 0.0} for h in hits]
     except Exception as exc:
         log.warning("typesense_vector_search_failed", error=str(exc))
 

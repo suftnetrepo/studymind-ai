@@ -772,6 +772,40 @@ class PlatformSummary(Base):
 # New tables only: create_all() adds them on startup and no existing table changes.
 # Sessions without a policy are never limited. Money is stored in integer micro-USD.
 
+class StudyMindEntitlement(Base):
+    """Canonical user-bound Web-purchased access. No client may grant this directly."""
+    __tablename__ = "studymind_entitlements"
+    __table_args__ = (
+        UniqueConstraint("stripe_checkout_session_id", name="uq_studymind_checkout_session"),
+        Index("ix_studymind_entitlements_user", "user_id", "expires_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    stripe_checkout_session_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    stripe_payment_intent_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    feature_limits: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    starts_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class StudyMindUsageCounter(Base):
+    """Atomic usage reservations are implemented separately; no browser writes."""
+    __tablename__ = "studymind_usage_counters"
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    feature: Mapped[str] = mapped_column(String(32), primary_key=True)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True)
+    used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 class UsagePolicy(Base):
     """A platform-issued pass (e.g. a Learnify AI Tutor Pass) bound to one platform user."""
     __tablename__ = "usage_policies"

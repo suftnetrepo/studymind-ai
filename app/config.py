@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     openai_chat_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-large"
     openai_embedding_dimension: int = 3072
+    # Client retry/timeout bounds. Defaults equal the previous library defaults (no behaviour change);
+    # cost-controlled test runs set OPENAI_LLM_MAX_RETRIES / OPENAI_EMBED_MAX_RETRIES to 0 or 1.
+    openai_llm_max_retries: int = Field(default=3, ge=0, le=10)
+    openai_embed_max_retries: int = Field(default=10, ge=0, le=10)
+    openai_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
 
     # ── PostgreSQL ────────────────────────────────────────────────────────
     # If DATABASE_URL is set (e.g. a managed Postgres like Neon), it takes
@@ -111,11 +116,38 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     chunk_overlap: int = 64
     top_k_retrieval: int = 6
+    # Vector candidate depth for hybrid search (>= top_k). Keeps keyword hits inside the vector result set so they carry a real similarity.
+    retrieval_vector_k: int = Field(default=100, ge=1, le=250)
     similarity_threshold: float = 0.25
 
     # ── Usage policies (opt-in quotas for pass sessions; see app/services/usage_policy.py) ──
     # Only API keys whose `platform` is listed may attach a usage policy to a session token.
     # Sessions without a policy are never limited.
+    # Safe rollout: disabled until migrations, concurrency and refund tests pass.
+    studymind_quota_enabled: bool = False
+
+    # Web-only Stripe one-time pass. Disabled until staging webhook validation.
+    studymind_billing_enabled: bool = False
+    studymind_stripe_secret_key: str = ""
+    studymind_stripe_webhook_secret: str = ""
+    # Stripe API origin. Only the default is accepted in production; a loopback override exists so local tests can use a
+    # recording stand-in (tests/fixtures-style) instead of the real API. Anything else makes checkout fail closed.
+    studymind_stripe_api_base: str = "https://api.stripe.com"
+    # Stripe accounts with Managed Payments enabled require a product tax code on inline prices. Set ONE of these to match the
+    # owner's tax decision; both default to "unchanged" (no tax code sent, Managed Payments left to the account default).
+    studymind_stripe_tax_code: str = ""
+    studymind_stripe_managed_payments: bool = True
+    studymind_checkout_success_url: str = ""
+    studymind_checkout_cancel_url: str = ""
+
+    # Password recovery remains unavailable until verified SMTP is configured.
+    password_recovery_enabled: bool = False
+    recovery_smtp_host: str = ""
+    recovery_smtp_port: int = 587
+    recovery_smtp_username: str = ""
+    recovery_smtp_password: str = ""
+    recovery_from_email: str = ""
+    recovery_public_url: str = ""
     usage_policy_platforms: str = "learnify"
     usage_policy_timezone: str = "Europe/London"
     # learnify_free_course_pass — frozen onto each policy when it is created

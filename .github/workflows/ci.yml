@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, "feat/**", "fix/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: sm_test
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: studymind_test          # name must contain "test": destructive tests refuse any other DB
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sm_test -d studymind_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      POSTGRES_HOST: 127.0.0.1
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: studymind_test
+      POSTGRES_USER: sm_test
+      POSTGRES_PASSWORD: ci-only-password
+      # Placeholders only. CI never calls OpenAI: AI boundaries are faked in tests.
+      OPENAI_API_KEY: ci-placeholder-not-a-real-key
+      JWT_SECRET_KEY: ci-placeholder-secret-minimum-32-characters
+      TYPESENSE_API_KEY: ci-placeholder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"        # matches the production Dockerfile
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Application import and route registration
+        run: python scripts/check_app_startup.py
+
+      - name: Model configuration is priced (default model is in the price table)
+        run: python scripts/print_model_config.py
+
+      - name: Tests
+        run: python -m pytest -q

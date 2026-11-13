@@ -6,6 +6,7 @@ All use GPT-4o with structured JSON output via the RAG retriever for context.
 from __future__ import annotations
 
 import json
+import random
 import re
 import uuid
 from typing import Any
@@ -31,6 +32,8 @@ def _retrieve_context(
     document_id: str | None = None,
     student_id: str         = "",
     top_k: int              = 20,
+    chunk_ranges: list[tuple[str, int, int]] | None = None,
+    char_budget: int        = 12000,
 ) -> tuple[str, int]:
     """
     Retrieve relevant chunks for a module/week/document.
@@ -38,35 +41,47 @@ def _retrieve_context(
     For summarisation we use a high top_k to get comprehensive coverage.
     """
     embed_model = get_embed_model()
-    scope       = SearchScope(
-        student_id=student_id,
-        module_id=module_id,
-        week_id=week_id,
-        current_semester_only=False,  # features should work across semesters
-        latest_only=True,
-        include_class=True,
-        include_personal=True,
-    )
 
-    retriever = ScopedHybridRetriever(
-        embed_model=embed_model,
-        scope=scope,
-        top_k=top_k,
-        score_threshold=0.0,  # for features, include all content not just top hits
-    )
+    def _search(ranges: list[tuple[str, int, int]], k: int):
+        scope = SearchScope(
+            student_id=student_id,
+            module_id=module_id,
+            week_id=week_id,
+            current_semester_only=False,  # features should work across semesters
+            latest_only=True,
+            include_class=True,
+            include_personal=True,
+            chunk_ranges=ranges,
+        )
+        retriever = ScopedHybridRetriever(
+            embed_model=embed_model,
+            scope=scope,
+            top_k=k,
+            score_threshold=0.0,  # for features, include all content not just top hits
+        )
+        return retriever.retrieve(QueryBundle(query_str=query))
 
-    query_bundle     = QueryBundle(query_str=query)
-    nodes_with_score = retriever.retrieve(query_bundle)
+    def _format(nodes) -> list[str]:
+        parts = []
+        for nws in nodes:
+            meta = nws.node.metadata
+            parts.append(f"[{meta.get('filename', 'doc')}, chunk {meta.get('chunk_index', 0)}]\n{nws.node.text}")
+        return parts
 
-    parts = []
-    for nws in nodes_with_score:
-        meta   = nws.node.metadata
-        fname  = meta.get("filename", "doc")
-        cidx   = meta.get("chunk_index", 0)
-        parts.append(f"[{fname}, chunk {cidx}]\n{nws.node.text}")
+    if not chunk_ranges:
+        nodes_with_score = _search([], top_k)
+        return "\n\n".join(_format(nodes_with_score)), len(nodes_with_score)
 
-    context = "\n\n".join(parts)
-    return context, len(nodes_with_score)
+    # Chosen chapters/sections: search each one on its own so every one is represented, and share the text budget between them.
+    per_k      = max(2, top_k // len(chunk_ranges))
+    per_chars  = max(1500, char_budget // len(chunk_ranges))
+    blocks, total = [], 0
+    for rng in chunk_ranges:
+        nodes = _search([rng], per_k)
+        total += len(nodes)
+        if nodes:
+            blocks.append("\n\n".join(_format(nodes))[:per_chars])
+    return "\n\n".join(blocks), total
 
 
 def _with_topic_focus(prompt: str, topic: str | None) -> str:
@@ -180,6 +195,7 @@ def generate_quiz(
     title: str              = "Quiz",
     topic: str | None       = None,
     complexity: str         = "normal",
+    chunk_ranges: list[tuple[str, int, int]] | None = None,
 ) -> list[dict]:
     """
     QUIZ-01/02/03: Generate quiz questions from module/week/document content.
@@ -193,6 +209,7 @@ def generate_quiz(
         document_id=document_id,
         student_id=student_id,
         top_k=min(question_count * 3, 30),
+        chunk_ranges=chunk_ranges,
     )
 
     if not context:
@@ -230,6 +247,9 @@ def generate_quiz(
             "source_chunk":  str(q.get("source_chunk", ""))[:500],
         })
 
+    if question_type == "mcq":
+        balance_option_positions(questions)
+
     log.info(
         "quiz_generated",
         question_count=len(questions),
@@ -237,6 +257,66 @@ def generate_quiz(
         chunks_used=chunk_count,
     )
     return questions
+
+
+# Options whose meaning depends on their position or on other options must not be reordered.
+_ORDER_DEPENDENT = re.compile(
+    r"\b(all|none|both|neither|either|any)\s+of\s+(the\s+)?(above|below|these|those|them|options?|choices?|answers?)\b"
+    r"|\b(a|b|c|d)\s+(and|or|&)\s+(a|b|c|d)\b|\babove\b|\bbelow\b|\bprevious\s+(option|answer|choice)",
+    re.IGNORECASE,
+)
+_LETTER_REF = re.compile(r"\b(option|answer|choice)(\s+)\(?([a-d])\)?(?![a-z])", re.IGNORECASE)
+
+
+def balance_option_positions(questions: list[dict], rng: random.Random | None = None) -> None:
+    """
+    Models strongly favour putting the correct MCQ answer at b (or c). Spread the correct answer evenly across
+    positions without changing any question's content or which option is correct.
+
+    In place. For each question with 3+ options and no order-dependent option ("all of the above", "both a and b"…):
+    the correct option is moved to a target position taken from a shuffled, evenly-cycled pool, the distractors are
+    shuffled, ids are reassigned a, b, c… in the new order, correct_answer follows the correct option, and any
+    "option b"-style references in the explanation are renumbered. Questions that cannot be safely reordered are
+    left exactly as generated.
+    """
+    rng = rng or random.SystemRandom()
+    eligible = []
+    for q in questions:
+        opts = q.get("options")
+        if not isinstance(opts, list) or len(opts) < 3 or len(opts) > 8:
+            continue
+        if not all(isinstance(o, dict) and "id" in o and "text" in o for o in opts):
+            continue
+        if any(_ORDER_DEPENDENT.search(o["text"]) for o in opts):
+            continue
+        correct = [i for i, o in enumerate(opts) if o["id"] == q.get("correct_answer")]
+        if len(correct) != 1:
+            continue
+        eligible.append((q, correct[0]))
+    if not eligible:
+        return
+
+    width = max(len(q["options"]) for q, _ in eligible)
+    pool: list[int] = []
+    while len(pool) < len(eligible):
+        cycle = list(range(width))
+        rng.shuffle(cycle)
+        pool.extend(cycle)
+
+    ids = "abcdefgh"
+    for (q, ci), slot in zip(eligible, pool):
+        opts = q["options"]
+        target = slot % len(opts)
+        correct_opt = opts[ci]
+        others = [o for i, o in enumerate(opts) if i != ci]
+        rng.shuffle(others)
+        new_order = others[:target] + [correct_opt] + others[target:]
+        old_to_new = {o["id"]: ids[i] for i, o in enumerate(new_order)}
+        q["options"] = [{"id": ids[i], "text": o["text"]} for i, o in enumerate(new_order)]
+        q["correct_answer"] = ids[target]
+        q["explanation"] = _LETTER_REF.sub(
+            lambda m: f"{m.group(1)}{m.group(2)}{old_to_new.get(m.group(3).lower(), m.group(3).lower())}", q.get("explanation", "")
+        )
 
 
 def _normalise_options(raw_options, raw_correct: str, question_type: str):
@@ -334,6 +414,7 @@ def generate_flashcards(
     max_cards: int          = 20,
     topic: str | None       = None,
     complexity: str         = "normal",
+    chunk_ranges: list[tuple[str, int, int]] | None = None,
 ) -> list[dict]:
     """
     FLASH-01/02: Generate flashcard deck from module/week/document content.
@@ -347,6 +428,7 @@ def generate_flashcards(
         document_id=document_id,
         student_id=student_id,
         top_k=min(max_cards * 2, 40),
+        chunk_ranges=chunk_ranges,
     )
 
     if not context:
@@ -394,7 +476,8 @@ You are an expert study assistant helping a student prepare for their exam.
 
 Summarise the following course content clearly and concisely.
 
-Structure your summary EXACTLY as follows (use Markdown headings):
+Part 1 - the summary. Use ONLY the content below. Do not add facts, definitions, warnings, comparisons or
+predictions of what will be examined that are not stated in the content. Use EXACTLY these Markdown headings:
 
 ## Key Concepts
 - Bullet list of the most important concepts covered
@@ -405,8 +488,11 @@ Structure your summary EXACTLY as follows (use Markdown headings):
 ## Important Definitions
 - Term: definition (one per bullet)
 
-## Exam Tips
-- What to remember, common pitfalls, likely exam topics
+Part 2 - general study advice, kept strictly separate. End with this exact heading and at most 3 bullets:
+
+## General study advice (not from your documents)
+- Advice about HOW to study (for example spaced repetition, self-testing, explaining aloud). It must contain no subject
+  facts, no claims about the content and no predictions about exam questions.
 
 Use clear, plain language a student would understand. Be comprehensive but not padded.
 
@@ -423,6 +509,7 @@ def generate_summary(
     scope: str              = "document",
     topic: str | None       = None,
     complexity: str         = "normal",
+    chunk_ranges: list[tuple[str, int, int]] | None = None,
 ) -> tuple[str, int]:
     """
     SUM-01/02: Generate a structured Markdown summary.
@@ -441,6 +528,7 @@ def generate_summary(
         document_id=document_id,
         student_id=student_id,
         top_k=40,   # high top_k — we want comprehensive coverage for summaries
+        chunk_ranges=chunk_ranges,
     )
 
     if not context:

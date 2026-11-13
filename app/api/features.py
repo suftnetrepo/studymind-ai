@@ -9,11 +9,13 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+import re
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.modules import _get_accessible_module
 from app.activity.tracker import log_activity
 from app.agents.ai_features import (
     generate_flashcards, generate_quiz, generate_summary, score_quiz,
@@ -21,7 +23,7 @@ from app.agents.ai_features import (
 from app.auth.dependencies import require_auth
 from app.db.engine import get_db
 from app.db.models import (
-    Document, Flashcard, FlashcardDeck, Module,
+    Document, Flashcard, FlashcardDeck, Module, ModuleDocument,
     QuizAttempt, QuizQuestion, Summary, Week,
 )
 from app.db.schemas import (
@@ -33,10 +35,97 @@ from app.db.schemas import (
 )
 from app.db.models import User
 from app.logging_config import get_logger
+from app.usage.studymind_guard import metered_generation
 
 log    = get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["features"])
 
+
+
+
+MAX_BALANCED_SECTIONS = 12
+SECTION_REF = re.compile(r"^([0-9a-fA-F-]{36}):(\d{1,4})$")
+
+
+async def _resolve_section_ranges(req, current_user: User, db: AsyncSession) -> list[tuple[str, int, int]] | None:
+    """
+    Turn the request's chosen chapters/sections (or `balanced`) into chunk ranges. Returns None when neither is used, which leaves
+    generation exactly as before. Only the caller's own view of the module is considered (class material plus their own personal
+    notes, latest versions), and retrieval filters again on access, so a reference can only ever narrow what is searched.
+    """
+    wanted = list(req.sections or [])
+    if not wanted and not req.balanced:
+        return None
+    module_id = req.module_id
+    if module_id is None:
+        raise HTTPException(status_code=422, detail="Chapters need a module")
+    rows = (await db.execute(
+        select(Document.id, Document.doc_metadata, ModuleDocument.created_at)
+        .join(ModuleDocument, ModuleDocument.document_id == Document.id)
+        .where(ModuleDocument.module_id == module_id, ModuleDocument.is_latest == True)
+        .where(
+            (ModuleDocument.visibility == "class") |
+            ((ModuleDocument.visibility == "personal") & (Document.owner_id == current_user.id))
+        )
+        .order_by(ModuleDocument.created_at.asc())
+    )).all()
+    by_ref: dict[str, tuple[str, int, int]] = {}
+    ordered: list[tuple[str, int, int]] = []
+    for doc_id, meta, _ in rows:
+        doc_secs: list[tuple[int, tuple[str, int, int]]] = []
+        for sec in ((meta or {}).get("sections") or []):
+            try:
+                ref = f"{doc_id}:{int(sec['i'])}"
+                rng = (str(doc_id), int(sec["chunk_start"]), int(sec["chunk_end"]))
+                level = int(sec.get("level") or 1)
+            except (KeyError, TypeError, ValueError):
+                continue
+            by_ref[ref] = rng
+            doc_secs.append((level, rng))
+        if doc_secs:
+            # "balanced" spreads over each document's chapters: the shallowest level that actually splits the document
+            # (a lone title heading does not), so a booklet titled "# Handbook" with "## Chapter" headings is split by chapter.
+            counts: dict[int, int] = {}
+            for level, _ in doc_secs:
+                counts[level] = counts.get(level, 0) + 1
+            top = min((lv for lv, n in counts.items() if n >= 2), default=min(counts))
+            ordered.extend(rng for level, rng in doc_secs if level == top)
+    if wanted:
+        out = []
+        for ref in dict.fromkeys(r.strip().lower() for r in wanted):
+            if not SECTION_REF.match(ref) or ref not in by_ref:
+                raise HTTPException(status_code=422, detail="One of the chosen chapters is not available in this module")
+            out.append(by_ref[ref])
+        return out
+    if not ordered:
+        return None      # nothing detected: behave as before
+    if len(ordered) <= MAX_BALANCED_SECTIONS:
+        return ordered
+    step = len(ordered) / MAX_BALANCED_SECTIONS
+    return [ordered[int(i * step)] for i in range(MAX_BALANCED_SECTIONS)]
+
+
+async def _authorize_generation_scope(req, current_user: User, db: AsyncSession) -> None:
+    """Fail closed before invoking any AI provider or retrieval.
+
+    Document-specific generation is disabled until the retriever enforces the
+    document ID (currently it ignores the ID and searches wider material).
+    """
+    if req.document_id is not None:
+        raise HTTPException(status_code=422, detail="Document-specific AI generation is temporarily unavailable")
+    module_id = req.module_id
+    if req.week_id is not None:
+        week_module_id = (await db.execute(
+            select(Week.module_id).where(Week.id == req.week_id)
+        )).scalar_one_or_none()
+        if week_module_id is None:
+            raise HTTPException(status_code=404, detail="Week not found")
+        if module_id is not None and module_id != week_module_id:
+            raise HTTPException(status_code=403, detail="Week does not belong to this module")
+        module_id = week_module_id
+    if module_id is None:
+        raise HTTPException(status_code=422, detail="A module or week is required")
+    await _get_accessible_module(module_id, current_user, db)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # QUIZ
@@ -59,21 +148,26 @@ async def generate_quiz_endpoint(
             detail="Provide at least one of: module_id, week_id, document_id",
         )
 
+    await _authorize_generation_scope(req, current_user, db)
+    chunk_ranges = await _resolve_section_ranges(req, current_user, db)
+
     title = req.title or _make_title("Quiz", req.module_id, req.week_id, req.document_id, db)
 
-    try:
-        questions_data = generate_quiz(
-            module_id=str(req.module_id)   if req.module_id   else None,
-            week_id=str(req.week_id)       if req.week_id     else None,
-            document_id=str(req.document_id) if req.document_id else None,
-            student_id=str(current_user.id),
-            question_count=req.question_count,
-            question_type=req.question_type,
-            title=title or "Quiz",
-            topic=req.topic,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    async with metered_generation(current_user.id, "quiz"):
+        try:
+            questions_data = generate_quiz(
+                module_id=str(req.module_id)   if req.module_id   else None,
+                week_id=str(req.week_id)       if req.week_id     else None,
+                document_id=str(req.document_id) if req.document_id else None,
+                student_id=str(current_user.id),
+                question_count=req.question_count,
+                question_type=req.question_type,
+                title=title or "Quiz",
+                topic=req.topic,
+                chunk_ranges=chunk_ranges,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     # Persist attempt + questions
     attempt = QuizAttempt(
@@ -263,17 +357,22 @@ async def generate_flashcards_endpoint(
             detail="Provide at least one of: module_id, week_id, document_id",
         )
 
-    try:
-        cards_data = generate_flashcards(
-            module_id=str(req.module_id)     if req.module_id   else None,
-            week_id=str(req.week_id)         if req.week_id     else None,
-            document_id=str(req.document_id) if req.document_id else None,
-            student_id=str(current_user.id),
-            max_cards=req.max_cards,
-            topic=req.topic,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    await _authorize_generation_scope(req, current_user, db)
+    chunk_ranges = await _resolve_section_ranges(req, current_user, db)
+
+    async with metered_generation(current_user.id, "flashcards"):
+        try:
+            cards_data = generate_flashcards(
+                module_id=str(req.module_id)     if req.module_id   else None,
+                week_id=str(req.week_id)         if req.week_id     else None,
+                document_id=str(req.document_id) if req.document_id else None,
+                student_id=str(current_user.id),
+                max_cards=req.max_cards,
+                topic=req.topic,
+                chunk_ranges=chunk_ranges,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     title = req.title or f"Flashcards — {len(cards_data)} cards"
 
@@ -441,17 +540,22 @@ async def summarise_endpoint(
             detail="Provide at least one of: module_id, week_id, document_id",
         )
 
-    try:
-        content, chunk_count = generate_summary(
-            module_id=str(req.module_id)     if req.module_id   else None,
-            week_id=str(req.week_id)         if req.week_id     else None,
-            document_id=str(req.document_id) if req.document_id else None,
-            student_id=str(current_user.id),
-            scope=req.scope,
-            topic=req.topic,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    await _authorize_generation_scope(req, current_user, db)
+    chunk_ranges = await _resolve_section_ranges(req, current_user, db)
+
+    async with metered_generation(current_user.id, "summary"):
+        try:
+            content, chunk_count = generate_summary(
+                module_id=str(req.module_id)     if req.module_id   else None,
+                week_id=str(req.week_id)         if req.week_id     else None,
+                document_id=str(req.document_id) if req.document_id else None,
+                student_id=str(current_user.id),
+                scope=req.scope,
+                topic=req.topic,
+                chunk_ranges=chunk_ranges,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
 
     summary = Summary(
         id=uuid.uuid4(),

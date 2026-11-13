@@ -39,7 +39,8 @@ from app.db.models import (
 from app.db.schemas import (
     DocumentUploadResponse, DocumentVersionSchema,
     EnrolRequest, EnrolmentSchema,
-    ModuleCreate, ModuleDetailSchema, ModuleDocumentSchema, ModuleSchema,
+    ModuleCreate, ModuleDetailSchema, ModuleDocumentSchema, ModuleOutline, ModuleSchema,
+    OutlineDocument, OutlineSection,
     SemesterCreate, SemesterSchema,
     WeekCreate, WeekSchema,
 )
@@ -520,6 +521,65 @@ async def enrol_in_module(
     return enrolment
 
 
+class JoinModuleRequest(BaseModel):
+    course_id: str = Field(..., min_length=3, max_length=64)
+
+
+@router.post("/modules/join")
+async def join_module_by_course_id(
+    body: JoinModuleRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    """Join a class via its UUID, course code or issued enrolment code.
+
+    Delegates to the existing enrolment rules so Web and Mobile share access checks.
+    """
+    if current_user.role not in ("student", "self_learner"):
+        raise HTTPException(status_code=403, detail="Only students can enrol in modules")
+    identifier = body.course_id.strip()
+    if not identifier or not all(c.isalnum() and c.isascii() or c in "_-" for c in identifier):
+        raise HTTPException(status_code=422, detail="Invalid Course ID")
+    try:
+        module_id = uuid.UUID(identifier)
+    except ValueError:
+        # Course codes are not globally guaranteed unique: fail closed if ambiguous.
+        matches = (await db.execute(
+            select(Module.id).where(
+                Module.course_code == identifier.upper(),
+                Module.access_type != "personal",
+                Module.status == "active",
+            ).limit(2)
+        )).scalars().all()
+        if len(matches) > 1:
+            raise HTTPException(status_code=409, detail="Course code is ambiguous. Ask for the module UUID.")
+        if matches:
+            module_id = matches[0]
+        else:
+            code = (await db.execute(select(InstitutionCode).where(
+                InstitutionCode.code == identifier,
+                InstitutionCode.code_type == "module_enrolment",
+                InstitutionCode.is_active == True,
+            ))).scalar_one_or_none()
+            if not code:
+                raise HTTPException(status_code=404, detail="Course ID not found")
+            linked = (code.metadata_ or {}).get("module_id")
+            if not linked:
+                raise HTTPException(status_code=404, detail="Course ID not found")
+            try:
+                module_id = uuid.UUID(linked)
+            except (ValueError, TypeError):
+                raise HTTPException(status_code=404, detail="Course ID not found")
+            if len(identifier) > 32:
+                raise HTTPException(status_code=422, detail="Enrolment code is too long")
+            enrolment = await enrol_in_module(
+                module_id, EnrolRequest(enrolment_code=identifier), db, current_user
+            )
+            return {"module_id": str(enrolment.module_id), "enrolment_id": str(enrolment.id)}
+    enrolment = await enrol_in_module(module_id, EnrolRequest(), db, current_user)
+    return {"module_id": str(enrolment.module_id), "enrolment_id": str(enrolment.id)}
+
+
 @router.get("/modules/{module_id}/students", response_model=list[dict])
 async def list_enrolled_students(
     module_id: uuid.UUID,
@@ -597,11 +657,14 @@ async def _ingest_module_document(
     """Shared by file upload, paste-text and AI-generated study material."""
     module = await _get_accessible_module(module_id, current_user, db)
 
-    # Access control: only lecturer/owner can upload class materials
-    if visibility == "class" and current_user.role == "student":
+    # Only the module owner or an administrator may publish class-wide files.
+    # This also protects against direct API calls from enrolled self-learners.
+    if visibility not in ("class", "personal"):
+        raise HTTPException(status_code=422, detail="Invalid document visibility")
+    if visibility == "class" and module.owner_id != current_user.id and current_user.role != "admin":
         raise HTTPException(
             status_code=403,
-            detail="Students cannot upload class materials. Use visibility=personal for personal notes.",
+            detail="Only the module owner may publish class materials. Use visibility=personal for personal notes.",
         )
 
     # Resolve week metadata
@@ -634,6 +697,8 @@ async def _ingest_module_document(
         .where(
             ModuleDocument.module_id == module_id,
             Document.filename == filename,
+            ModuleDocument.visibility == visibility,
+            Document.owner_id == current_user.id,
             ModuleDocument.is_latest == True,
         )
     )
@@ -689,11 +754,10 @@ async def _ingest_module_document(
     def _run():
         try:
             r = ingestor.ingest(filename, content, doc_id, **ingest_params)
-            log.info("ingest_result", status=r["status"], chunks=r["chunk_count"], error=r["error"])
+            log.info("ingest_result", status=r["status"], chunks=r["chunk_count"])
             return r
         except Exception as e:
-            log.error("ingest_exception", error=str(e))
-            import traceback; traceback.print_exc()
+            log.error("ingest_exception", error_type=type(e).__name__)
             raise
 
     result = await loop.run_in_executor(executor, _run)
@@ -717,8 +781,14 @@ async def _ingest_module_document(
                 ))
             doc_obj.status      = result["status"]
             doc_obj.chunk_count = result["chunk_count"]
-            doc_obj.error_message = result["error"]
+            doc_obj.error_message = (
+                "Document indexing failed. Please try again or contact support."
+                if result["status"] == "failed" else None
+            )
             doc_obj.indexed_at  = result["indexed_at"]
+            if result.get("sections"):
+                # Detected chapters/sections (see app/ingestion/structure.py). A new dict, so the JSONB change is saved.
+                doc_obj.doc_metadata = {**(doc_obj.doc_metadata or {}), "sections": result["sections"]}
             session.commit()
         engine.dispose()
 
@@ -890,6 +960,43 @@ async def create_enrolment_code(
     return {"code": code_str, "module_id": str(module_id)}
 
 
+@router.get("/modules/{module_id}/outline", response_model=ModuleOutline)
+async def module_outline(
+    module_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    """
+    Chapters/sections detected in the module's documents when they were uploaded, for picking what Quiz, Flashcards and Summary
+    should cover. Same visibility as the document list: class material plus the caller's own personal notes, latest versions only.
+    """
+    await _get_accessible_module(module_id, current_user, db)
+    rows = (await db.execute(
+        select(Document.id, Document.filename, Document.doc_metadata)
+        .join(ModuleDocument, ModuleDocument.document_id == Document.id)
+        .where(ModuleDocument.module_id == module_id, ModuleDocument.is_latest == True, Document.status == "indexed")
+        .where(
+            (ModuleDocument.visibility == "class") |
+            ((ModuleDocument.visibility == "personal") & (Document.owner_id == current_user.id))
+        )
+        .order_by(ModuleDocument.created_at.asc())
+    )).all()
+    documents = []
+    for doc_id, filename, meta in rows:
+        sections = []
+        for sec in ((meta or {}).get("sections") or [])[:200]:
+            try:
+                idx = int(sec["i"])
+                sections.append(OutlineSection(ref=f"{doc_id}:{idx}", index=idx, title=str(sec["title"])[:120],
+                                               level=min(max(int(sec.get("level") or 1), 1), 3),
+                                               page=int(sec["page"]) if sec.get("page") else None))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if sections:
+            documents.append(OutlineDocument(document_id=doc_id, filename=filename, sections=sections))
+    return ModuleOutline(documents=documents)
+
+
 @router.get("/modules/{module_id}/documents", response_model=list[ModuleDocumentSchema])
 async def list_module_documents(
     module_id: uuid.UUID,
@@ -905,8 +1012,6 @@ async def list_module_documents(
         select(ModuleDocument, Document)
         .join(Document, Document.id == ModuleDocument.document_id)
         .where(ModuleDocument.module_id == module_id)
-        .where(Document.chunk_count > 0)
-        .where(Document.status == "indexed")
     )
 
     if latest_only:
@@ -914,12 +1019,12 @@ async def list_module_documents(
     if week_id:
         query = query.where(ModuleDocument.week_id == week_id)
 
-    # SRCH-08: Students see class + their own personal notes only
-    if current_user.role == "student":
-        query = query.where(
-            (ModuleDocument.visibility == "class") |
-            ((ModuleDocument.visibility == "personal") & (Document.owner_id == current_user.id))
-        )
+    # Personal notes are private to their uploader, including from lecturers.
+    # Administrators are not implicitly granted access to private study notes.
+    query = query.where(
+        (ModuleDocument.visibility == "class") |
+        ((ModuleDocument.visibility == "personal") & (Document.owner_id == current_user.id))
+    )
 
     result = await db.execute(query.order_by(ModuleDocument.created_at.desc()))
     out    = []
@@ -959,10 +1064,13 @@ async def delete_module_document(
 
     md, doc = row
 
-    # Only the module owner, an admin, or the person who uploaded the document may delete it
+    # Private notes are owned by their uploader, not by the class lecturer.
+    # Class documents can be deleted by their uploader or the module owner.
     module = await _get_module_or_404(module_id, db)
-    if module.owner_id != current_user.id and current_user.role != "admin" and doc.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="You can only delete your own documents")
+    if doc.owner_id != current_user.id and not (
+        md.visibility == "class" and (module.owner_id == current_user.id or current_user.role == "admin")
+    ):
+        raise HTTPException(status_code=403, detail="You can only delete your own personal notes")
 
     ts_client = get_typesense_client()
     delete_document_chunks(ts_client, str(document_id))
@@ -986,29 +1094,40 @@ async def get_document_versions(
     """DOC-11: Show version history for a document."""
     await _get_accessible_module(module_id, current_user, db)
 
+    # Resolve only a document belonging to this module; never disclose another
+    # learner's private note or use its filename to enumerate versions.
+    target_result = await db.execute(
+        select(ModuleDocument, Document)
+        .join(Document, Document.id == ModuleDocument.document_id)
+        .where(ModuleDocument.module_id == module_id, Document.id == document_id)
+    )
+    target = target_result.first()
+    if not target:
+        raise HTTPException(status_code=404, detail="Document not found")
+    target_md, target_doc = target
+    if target_md.visibility == "personal" and target_doc.owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Document not found")
+
     result = await db.execute(
         select(ModuleDocument, Document)
         .join(Document, Document.id == ModuleDocument.document_id)
-        .where(ModuleDocument.module_id == module_id)
+        .where(
+            ModuleDocument.module_id == module_id,
+            Document.filename == target_doc.filename,
+            Document.owner_id == target_doc.owner_id,
+            ModuleDocument.visibility == target_md.visibility,
+        )
         .order_by(ModuleDocument.version.desc())
     )
-
-    # Find the filename of this document first
-    target = await db.execute(select(Document).where(Document.id == document_id))
-    target_doc = target.scalar_one_or_none()
-    if not target_doc:
-        raise HTTPException(status_code=404, detail="Document not found")
-
     versions = []
     for md, doc in result.all():
-        if doc.filename == target_doc.filename:
-            versions.append(DocumentVersionSchema(
-                version=md.version,
-                created_at=md.created_at,
-                is_latest=md.is_latest,
-                document_id=doc.id,
-                filename=doc.filename,
-            ))
+        versions.append(DocumentVersionSchema(
+            version=md.version,
+            created_at=md.created_at,
+            is_latest=md.is_latest,
+            document_id=doc.id,
+            filename=doc.filename,
+        ))
     return versions
 
 
@@ -1052,8 +1171,8 @@ async def _get_accessible_module(
     if module.access_type == "institution" and module.institution_id == user.institution_id:
         return module
 
-    # Student must be enrolled
-    if user.role == "student":
+    # Students and self-learners can both join class modules.
+    if user.role in ("student", "self_learner"):
         enrolment = await db.execute(
             select(Enrolment).where(
                 Enrolment.student_id == user.id,
