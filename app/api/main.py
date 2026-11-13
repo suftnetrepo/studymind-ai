@@ -80,7 +80,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=["https://learnify-lfhf.onrender.com", "https://studymind-web.onrender.com", "https://dashboard.aismartlearner.com"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
