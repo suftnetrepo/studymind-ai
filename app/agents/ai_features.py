@@ -13,6 +13,7 @@ from typing import Any
 
 from llama_index.core.schema import QueryBundle
 
+from app.agents.formatting import with_json_rules, with_markdown_rules
 from app.agents import llm_usage
 from app.agents.llm_factory import get_embed_model, get_llm
 from app.config import get_settings
@@ -227,6 +228,7 @@ def generate_quiz(
         context=context[:12000],  # stay within context window
     ), topic)
     prompt = _with_complexity(prompt, "quiz", complexity)
+    prompt = with_json_rules(prompt)
 
     questions_raw = _call_llm_json(prompt)
 
@@ -439,6 +441,7 @@ def generate_flashcards(
         context=context[:12000],
     ), topic)
     prompt = _with_complexity(prompt, "flashcards", complexity)
+    prompt = with_json_rules(prompt)
 
     cards_raw = _call_llm_json(prompt)
 
@@ -539,6 +542,7 @@ def generate_summary(
         context=context[:14000],
     ), topic)
     prompt  = _with_complexity(prompt, "summary", complexity)
+    prompt = with_markdown_rules(prompt)
 
     llm     = get_llm()
     result  = llm.complete(prompt)

@@ -18,6 +18,7 @@ from llama_index.core import PromptTemplate
 from llama_index.core.schema import QueryBundle
 
 from app.agents import llm_usage
+from app.agents.formatting import MARKDOWN_RULES
 from app.agents.llm_factory import get_embed_model, get_llm
 from app.config import get_settings
 from app.db.schemas import ScopeIndicator, SourceCitation
@@ -70,7 +71,7 @@ COMPLEXITY LEVEL: EXPERT
 
 def build_system_prompt(complexity: str = "normal") -> str:
     modifier = COMPLEXITY_MODIFIERS.get(complexity, COMPLEXITY_MODIFIERS["normal"])
-    return f"{SYSTEM_PROMPT}\n{modifier}"
+    return f"{SYSTEM_PROMPT}\n{modifier}\n{MARKDOWN_RULES}"
 
 QA_PROMPT_TMPL = """\
 {system_prompt}
