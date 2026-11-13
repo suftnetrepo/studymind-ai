@@ -203,9 +203,11 @@ async def list_modules(
 
     # A student's own archive flag lives on their enrolment, not on the shared module.
     mine = await db.execute(
-        select(Enrolment.module_id, Enrolment.status).where(Enrolment.student_id == current_user.id)
+        select(Enrolment.module_id, Enrolment.status, Enrolment.enrolled_at).where(Enrolment.student_id == current_user.id)
     )
-    my_enrolment = {r[0]: r[1] for r in mine.all()}
+    mine_rows    = mine.all()
+    my_enrolment = {r[0]: r[1] for r in mine_rows}
+    my_enrolled_at = {r[0]: r[2] for r in mine_rows}
 
     out = []
     for m in modules:
@@ -221,6 +223,8 @@ async def list_modules(
         s.document_count = doc_count
         s.student_count  = student_count
         s.emoji          = (m.module_metadata or {}).get("emoji")
+        if m.owner_id != current_user.id:
+            s.enrolled_at = my_enrolled_at.get(m.id)
         if m.owner_id != current_user.id and my_enrolment.get(m.id) == "archived":
             s.status = "archived"
         s.progress       = min(100, round(activity_counts.get(m.id, 0) / 10 * 100))
