@@ -11,7 +11,8 @@ FORMATTING (the answer is rendered as Markdown with mathematics):
 - Mathematics: inline maths between single dollar signs, for example $x^2 + y^2 = z^2$ or $\frac{2}{5}$; display equations between double dollar
   signs on their own lines. Never use \( \) or \[ \] delimiters, and never put plain-language words inside maths without \text{...}.
 - Write currency as plain text such as 5 dollars or USD 5, not with a dollar sign next to a number.
-- Chemical formulas and reactions: use Unicode (H₂O, CO₂, SO₄²⁻, Na⁺, 2H₂ + O₂ → 2H₂O, ⇌), or $\ce{2H2 + O2 -> 2H2O}$ for complex ones.
+- Chemical formulas and reactions: always use Unicode (H₂O, CO₂, SO₄²⁻, Na⁺, 2H₂ + O₂ → 2H₂O, ⇌), never \ce{...}.
+- Keep maths simple: fractions, powers, roots, Greek letters and integrals. Avoid \begin{...} environments, matrices and \text blocks.
 - Everyday symbols may be written directly in Unicode (π, θ, Δ, °C, ≤, ≥, ≈, ±, ×, √).
 - Code goes in fenced blocks with a language tag, for example ```python.
 - Worked solutions use numbered steps. Do not use HTML tags.
