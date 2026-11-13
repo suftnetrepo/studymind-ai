@@ -519,6 +519,11 @@ class ScopedChatRequest(BaseModel):
     # Explanation depth: simple ("explain like I'm 5") | normal | expert
     complexity: str = Field(default="normal", pattern="^(simple|normal|expert)$")
 
+    # Optional focus (non-breaking): chapters "document_id:index" from GET /modules/{id}/outline, and/or a topic that steers retrieval
+    sections: Optional[list[str]] = Field(default=None, max_length=12)
+    balanced: bool = False
+    topic: Optional[str] = Field(default=None, max_length=200)
+
     # SRCH-03/04: /csc109/week3 shortcut embedded in message is auto-detected
     # No extra field needed — parser reads message prefix
 

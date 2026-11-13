@@ -136,3 +136,13 @@ def test_backfill_detects_headings_in_stored_chunks():
     got = mod.detect(chunks)
     assert [(s["title"], s["chunk_start"], s["chunk_end"]) for s in got] == [("Handbook", 0, 4), ("Chapter 1: Cells", 1, 3), ("Chapter 2: Genetics", 3, 4)]
     assert mod.detect([(0, "just text"), (1, "more text")]) == []
+
+
+def test_chat_request_focus_is_optional_and_bounded():
+    from app.db.schemas import ScopedChatRequest
+    r = ScopedChatRequest(module_id="00000000-0000-4000-8000-000000000001", message="hi")
+    assert r.sections is None and r.topic is None and r.balanced is False
+    with pytest.raises(Exception):
+        ScopedChatRequest(message="hi", sections=["x:1"] * 13)
+    with pytest.raises(Exception):
+        ScopedChatRequest(message="hi", topic="t" * 201)

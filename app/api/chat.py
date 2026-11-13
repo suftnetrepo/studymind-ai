@@ -27,6 +27,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.api.features import _resolve_section_ranges
 from app.api.modules import _get_accessible_module
 from app.activity.tracker import log_activity
 from app.agents.rag_pipeline import COMPLEXITY_MODIFIERS, get_pipeline
@@ -139,6 +140,8 @@ async def chat(
     )
     course_code = None  # Never broaden a module-scoped retrieval to a shared course code.
 
+    chunk_ranges = await _resolve_section_ranges(req, current_user, db)
+
     settings = get_settings()
     pipeline = get_pipeline()
 
@@ -164,6 +167,8 @@ async def chat(
             include_archived=req.include_archived,
             semester_label=semester_label,
             complexity=req.complexity,
+            chunk_ranges=chunk_ranges,
+            topic=req.topic,
         )
 
     # Save assistant message with full metadata
@@ -230,6 +235,8 @@ async def chat_stream(
     )
     course_code = None  # Never broaden a module-scoped retrieval to a shared course code.
 
+    chunk_ranges = await _resolve_section_ranges(req, current_user, db)
+
     pipeline   = get_pipeline()
     settings   = get_settings()
     session_id = str(session.id)
@@ -260,6 +267,8 @@ async def chat_stream(
                 include_archived=req.include_archived,
                 semester_label=semester_label,
                 complexity=req.complexity,
+                chunk_ranges=chunk_ranges,
+                topic=req.topic,
             )
 
             # Send scope before first token (SRCH-05)
