@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-import smtplib
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 from urllib.parse import quote
 
 from app.config import get_settings
+from app.email.sender import email_configured, send_email
+from app.email.templates import reset_email
 
 
 def new_recovery_token() -> tuple[str, str]:
@@ -26,24 +26,14 @@ def recovery_expiry() -> datetime:
 
 def recovery_configured() -> bool:
     s = get_settings()
-    return bool(s.password_recovery_enabled and s.recovery_smtp_host
-                and s.recovery_smtp_username and s.recovery_smtp_password
-                and s.recovery_from_email and s.recovery_public_url.startswith("https://"))
+    return bool(s.password_recovery_enabled and email_configured() and s.recovery_public_url.startswith("https://"))
 
 
-def send_recovery_email(to_email: str, token: str) -> None:
-    """Run via asyncio.to_thread; never print URL, token, or provider exception."""
+async def send_recovery_email(to_email: str, full_name: str, token: str) -> bool:
+    """Never prints the URL, token, address or provider error. Returns whether the provider accepted the message."""
     s = get_settings()
     if not recovery_configured():
         raise RuntimeError("Password recovery delivery is not configured")
     url = s.recovery_public_url.rstrip("/") + "?token=" + quote(token, safe="")
-    message = EmailMessage()
-    message["Subject"] = "Reset your StudyMind password"
-    message["From"] = s.recovery_from_email
-    message["To"] = to_email
-    message.set_content("Use this link to reset your StudyMind password within 30 minutes:\n\n" + url
-                        + "\n\nIf you did not request this, ignore this message.")
-    with smtplib.SMTP(s.recovery_smtp_host, s.recovery_smtp_port, timeout=10) as smtp:
-        smtp.starttls()
-        smtp.login(s.recovery_smtp_username, s.recovery_smtp_password)
-        smtp.send_message(message)
+    subject, html, text = reset_email(full_name, url)
+    return await send_email(to_email, full_name, subject, html, text)
