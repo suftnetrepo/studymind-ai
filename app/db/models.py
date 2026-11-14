@@ -143,6 +143,9 @@ class User(Base):
     password_reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
         "PasswordResetToken", back_populates="user", cascade="all, delete-orphan"
     )
+    magic_tokens: Mapped[list["MagicToken"]] = relationship(
+        "MagicToken", back_populates="user", cascade="all, delete-orphan"
+    )
     sessions: Mapped[list["ChatSession"]] = relationship(
         "ChatSession", back_populates="user", cascade="all, delete-orphan"
     )
@@ -885,3 +888,21 @@ class UsageEvent(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class MagicToken(Base):
+    """Single-use magic link token for mobile → web handoff (quota top-up flow)."""
+    __tablename__ = "magic_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    user: Mapped["User"] = relationship("User", back_populates="magic_tokens")

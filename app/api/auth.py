@@ -28,7 +28,7 @@ from app.auth.security import (
 )
 from app.config import get_settings
 from app.db.engine import get_db
-from app.db.models import RefreshToken, User, PasswordResetToken
+from app.db.models import RefreshToken, User, PasswordResetToken, MagicToken
 from app.db.schemas import (
     ForgotPasswordRequest,
     LoginRequest,
@@ -41,6 +41,7 @@ from app.db.schemas import (
 from app.logging_config import get_logger
 from app.email.welcome import send_welcome_email
 from app.auth.recovery import new_recovery_token, hash_recovery_token, recovery_expiry, recovery_configured, send_recovery_email
+from app.auth.magic import new_magic_token, hash_magic_token, magic_token_expiry
 from pydantic import BaseModel, EmailStr, Field
 
 log    = get_logger(__name__)
@@ -430,4 +431,97 @@ async def learning_overview(
             "role": current_user.role,
         },
         "modules": {"owned": owned_count or 0, "enrolled": enrolled_count or 0},
+    }
+
+
+# ── Magic-link: mobile → web handoff ────────────────────────────────────────
+
+@router.post("/magic-link", status_code=201)
+async def create_magic_link(
+    current_user: User = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a single-use magic token for the authenticated mobile user.
+
+    The mobile app uses this to hand the user off to the web billing page
+    without requiring them to sign in again.  Token is valid for 10 minutes.
+    """
+    # Purge any existing unused tokens for this user (one at a time is enough)
+    existing = (await db.execute(
+        select(MagicToken).where(
+            MagicToken.user_id == current_user.id,
+            MagicToken.used == False,  # noqa: E712
+        )
+    )).scalars().all()
+    for t in existing:
+        await db.delete(t)
+
+    raw, token_hash = new_magic_token()
+    db.add(MagicToken(
+        user_id=current_user.id,
+        token_hash=token_hash,
+        expires_at=magic_token_expiry(),
+        used=False,
+    ))
+    await db.commit()
+    # Raw token returned once — never stored, never logged
+    return {"token": raw}
+
+
+class MagicVerifyRequest(BaseModel):
+    token: str
+
+
+@router.post("/magic-verify")
+async def verify_magic_link(
+    body: MagicVerifyRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Exchange a raw magic token for a JWT pair.
+
+    Called by the web app's /auth/magic page.  Single-use and time-limited.
+    Returns the same shape as /api/auth/login so the web can set its session.
+    """
+    invalid = HTTPException(status_code=400, detail="Magic link is invalid or has expired.")
+
+    token_hash = hash_magic_token(body.token)
+    record = (await db.execute(
+        select(MagicToken).where(MagicToken.token_hash == token_hash)
+    )).scalar_one_or_none()
+
+    if record is None or record.used:
+        raise invalid
+    if record.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        raise invalid
+
+    # Mark used before issuing tokens (prevents replay on concurrent requests)
+    record.used = True
+    await db.flush()
+
+    user = (await db.execute(
+        select(User).where(User.id == record.user_id)
+    )).scalar_one_or_none()
+    if user is None or not user.is_active:
+        raise invalid
+
+    # Issue a full JWT pair so the web can establish a normal session
+    access_token = create_access_token(str(user.id), user.role, user.email)
+    refresh_token_raw, refresh_token_hash = generate_refresh_token()
+    db.add(RefreshToken(
+        user_id=user.id,
+        token_hash=refresh_token_hash,
+        expires_at=refresh_token_expiry(),
+    ))
+    await db.commit()
+
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token_raw,  # raw token, single use
+        "token_type": "bearer",
+        "user": {
+            "id": str(user.id),
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": user.role,
+        },
     }
