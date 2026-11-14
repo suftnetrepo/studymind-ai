@@ -30,6 +30,7 @@ from sqlalchemy.orm import selectinload
 from app.api.features import _resolve_section_ranges
 from app.api.modules import _get_accessible_module
 from app.activity.tracker import log_activity
+from app.agents.formatting import with_markdown_rules
 from app.agents.rag_pipeline import COMPLEXITY_MODIFIERS, get_pipeline
 from app.auth.dependencies import require_auth
 from app.config import get_settings
@@ -535,6 +536,7 @@ async def general_chat(
     system = GENERAL_SYSTEM_PROMPT.format(
         complexity=COMPLEXITY_MODIFIERS.get(req.complexity, COMPLEXITY_MODIFIERS["normal"])
     )
+    system = with_markdown_rules(system)
     started = time.monotonic()
     async with metered_generation(current_user.id, "chat"):
         try:

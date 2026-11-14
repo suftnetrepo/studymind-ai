@@ -119,19 +119,16 @@ async def create_module(
 ):
     """
     MOD-01: Lecturer creates a class module.
-    MOD-06: Self-learner creates a personal course (access_type=personal).
+    MOD-06: Students (and self-learners) create personal courses (access_type=personal).
     """
-    if current_user.role not in {"lecturer", "admin", "self_learner"}:
-        raise HTTPException(
-            status_code=403,
-            detail="Students cannot create modules. Use an enrolment code to join a module.",
-        )
+    if current_user.role not in {"lecturer", "admin", "student", "self_learner"}:
+        raise HTTPException(status_code=403, detail="You cannot create modules.")
 
-    # Self-learners can only create personal courses
-    if current_user.role == "self_learner" and body.access_type != "personal":
+    # Students and self-learners can only create personal courses; class modules belong to lecturers
+    if current_user.role in {"student", "self_learner"} and body.access_type != "personal":
         raise HTTPException(
             status_code=403,
-            detail="Self-learners can only create personal courses (access_type=personal)",
+            detail="Students can only create personal modules (access_type=personal). Class modules are created by lecturers.",
         )
 
     module = Module(
@@ -167,19 +164,11 @@ async def list_modules(
 ):
     """
     Lecturer: returns modules they own.
-    Student: returns modules they are enrolled in.
-    Self-learner: returns their personal courses.
+    Student / self-learner: their own personal modules plus any module they enrolled in.
     """
     if current_user.role in ("lecturer", "admin"):
         query = select(Module).where(Module.owner_id == current_user.id)
-    elif current_user.role == "student":
-        query = (
-            select(Module)
-            .join(Enrolment, Enrolment.module_id == Module.id)
-            .where(Enrolment.student_id == current_user.id,
-                   Enrolment.status.in_(("active", "archived")))
-        )
-    else:  # self_learner: own courses plus any module they enrolled in
+    else:  # student / self_learner: own personal modules plus any module they enrolled in
         enrolled = select(Enrolment.module_id).where(
             Enrolment.student_id == current_user.id, Enrolment.status.in_(("active", "archived"))
         )
@@ -203,9 +192,11 @@ async def list_modules(
 
     # A student's own archive flag lives on their enrolment, not on the shared module.
     mine = await db.execute(
-        select(Enrolment.module_id, Enrolment.status).where(Enrolment.student_id == current_user.id)
+        select(Enrolment.module_id, Enrolment.status, Enrolment.enrolled_at).where(Enrolment.student_id == current_user.id)
     )
-    my_enrolment = {r[0]: r[1] for r in mine.all()}
+    mine_rows    = mine.all()
+    my_enrolment = {r[0]: r[1] for r in mine_rows}
+    my_enrolled_at = {r[0]: r[2] for r in mine_rows}
 
     out = []
     for m in modules:
@@ -221,6 +212,8 @@ async def list_modules(
         s.document_count = doc_count
         s.student_count  = student_count
         s.emoji          = (m.module_metadata or {}).get("emoji")
+        if m.owner_id != current_user.id:
+            s.enrolled_at = my_enrolled_at.get(m.id)
         if m.owner_id != current_user.id and my_enrolment.get(m.id) == "archived":
             s.status = "archived"
         s.progress       = min(100, round(activity_counts.get(m.id, 0) / 10 * 100))

@@ -146,3 +146,8 @@ def test_chat_request_focus_is_optional_and_bounded():
         ScopedChatRequest(message="hi", sections=["x:1"] * 13)
     with pytest.raises(Exception):
         ScopedChatRequest(message="hi", topic="t" * 201)
+
+
+def test_module_schema_enrolled_at_is_optional():
+    from app.db.schemas import ModuleSchema
+    assert "enrolled_at" in ModuleSchema.model_fields and ModuleSchema.model_fields["enrolled_at"].default is None
