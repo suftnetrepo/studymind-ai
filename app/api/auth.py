@@ -13,7 +13,7 @@ import uuid
 import asyncio
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,6 +39,7 @@ from app.db.schemas import (
     UserUpdateRequest,
 )
 from app.logging_config import get_logger
+from app.email.welcome import send_welcome_email
 from app.auth.recovery import new_recovery_token, hash_recovery_token, recovery_expiry, recovery_configured, send_recovery_email
 from pydantic import BaseModel, EmailStr, Field
 
@@ -56,7 +57,7 @@ async def public_config():
 # ── AUTH-01: Register ──────────────────────────────────────────────────────
 
 @router.post("/register", response_model=UserSchema, status_code=201)
-async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+async def register(body: RegisterRequest, background_tasks: BackgroundTasks, db: AsyncSession = Depends(get_db)):
     """Register a new user account. Role must be one of: lecturer | student | self_learner."""
 
     # Admin accounts are provisioned by staff (seed script / database), never self-served.
@@ -92,6 +93,8 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
     await db.refresh(user)
 
     log.info("user_registered", user_id=str(user.id), role=user.role)
+    # Welcome message after the response is sent; a delivery problem never affects sign-up.
+    background_tasks.add_task(send_welcome_email, user.email, user.full_name, user.role)
     return user
 
 
@@ -157,7 +160,7 @@ async def request_password_recovery(
         db.add(PasswordResetToken(user_id=user.id, token_hash=digest, expires_at=recovery_expiry(), used=False))
         await db.commit()
         try:
-            await asyncio.to_thread(send_recovery_email, user.email, raw)
+            await send_recovery_email(user.email, user.full_name, raw)
         except Exception as exc:
             log.error("recovery_delivery_failed", error_type=type(exc).__name__)
     return {"message": "If an eligible account exists, a reset link will be sent."}

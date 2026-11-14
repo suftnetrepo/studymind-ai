@@ -148,6 +148,12 @@ class Settings(BaseSettings):
     recovery_smtp_password: str = ""
     recovery_from_email: str = ""
     recovery_public_url: str = ""
+    # Transactional email (welcome, password reset). Brevo API preferred (same provider as Learnify); the SMTP settings above are a fallback.
+    brevo_api_key: str = ""
+    email_from_address: str = ""          # verified sender, e.g. noreply@your-domain; falls back to RECOVERY_FROM_EMAIL
+    email_from_name: str = "StudyMind"
+    email_welcome_enabled: bool = True
+    email_app_url: str = ""               # public Web address used for links in the welcome email, e.g. https://studymind-web.onrender.com
     usage_policy_platforms: str = "learnify"
     usage_policy_timezone: str = "Europe/London"
     # learnify_free_course_pass — frozen onto each policy when it is created
