@@ -409,7 +409,8 @@ async def submit_assignment(
 
     # Check deadline — block late submissions
     now = datetime.now(timezone.utc)
-    if now > assignment.due_at.replace(tzinfo=timezone.utc) if assignment.due_at.tzinfo is None else assignment.due_at:
+    due_at = assignment.due_at if assignment.due_at.tzinfo is not None else assignment.due_at.replace(tzinfo=timezone.utc)
+    if now > due_at:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="The deadline has passed. Late submissions are not accepted.",
