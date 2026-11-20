@@ -80,6 +80,7 @@ async def _grade_in_background(
     scheme_filename: str,
     submission_url: str,
     submission_filename: str,
+    grading_prompt: Optional[str] = None,
 ) -> None:
     """Run AI grading and persist the result — called as a background task."""
     from app.db.engine import AsyncSessionLocal  # local import to avoid circular
@@ -109,6 +110,7 @@ async def _grade_in_background(
             scheme_filename=scheme_filename,
             submission_url=sub_dl,
             submission_filename=submission_filename,
+            grading_prompt=assignment.grading_prompt,
         )
 
         sub.score           = result.score
@@ -126,15 +128,16 @@ async def _grade_in_background(
 
 @router.post("", response_model=AssignmentSchema, status_code=201)
 async def create_assignment(
-    module_id:   uuid.UUID = Form(...),
-    title:       str        = Form(...),
-    description: str        = Form(""),
-    due_at:      datetime   = Form(...),
-    max_score:   int        = Form(100),
-    brief:       UploadFile = File(...),
-    scheme:      UploadFile = File(...),
-    db:          AsyncSession = Depends(get_db),
-    current_user: User        = Depends(require_lecturer),
+    module_id:      uuid.UUID = Form(...),
+    title:          str        = Form(...),
+    description:    str        = Form(""),
+    due_at:         datetime   = Form(...),
+    max_score:      int        = Form(100),
+    grading_prompt: str        = Form(""),
+    brief:          UploadFile = File(...),
+    scheme:         UploadFile = File(...),
+    db:             AsyncSession = Depends(get_db),
+    current_user:   User         = Depends(require_lecturer),
 ):
     """Create an assignment with brief + marking scheme PDFs/Word files."""
     _require_allowed(brief.filename or "")
@@ -169,6 +172,7 @@ async def create_assignment(
         description=description.strip() or None,
         due_at=due_at,
         max_score=max(1, min(100, max_score)),
+        grading_prompt=grading_prompt.strip() or None,
         brief_cloudinary_id=brief_result["public_id"],
         brief_cloudinary_url=brief_result["secure_url"],
         brief_filename=brief.filename or "brief",
@@ -455,6 +459,7 @@ async def submit_assignment(
         assignment.scheme_filename,
         upload_result["secure_url"],
         work.filename or "submission",
+        assignment.grading_prompt,
     )
 
     return SubmissionSchema.model_validate(submission)

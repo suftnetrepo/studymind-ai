@@ -124,6 +124,7 @@ async def grade_submission(
     scheme_filename: str,
     submission_url: str,
     submission_filename: str,
+    grading_prompt: Optional[str] = None,
 ) -> GradingResult:
     """
     Download all three files, extract their text, and ask GPT to grade.
@@ -165,12 +166,17 @@ async def grade_submission(
         f"=== STUDENT SUBMISSION ===\n{work_text}"
     )
 
+    # Build system prompt — append lecturer grading instructions if provided
+    system_prompt = _SYSTEM_PROMPT
+    if grading_prompt and grading_prompt.strip():
+        system_prompt += f"\n\nADDITIONAL GRADING INSTRUCTIONS FROM THE LECTURER:\n{grading_prompt.strip()}"
+
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     try:
         response = await client.chat.completions.create(
             model=settings.openai_chat_model,
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user",   "content": user_msg},
             ],
             temperature=0.1,

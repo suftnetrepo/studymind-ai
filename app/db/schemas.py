@@ -800,6 +800,7 @@ class AssignmentCreate(BaseModel):
     description: Optional[str] = None
     due_at: datetime
     max_score: int = Field(default=100, ge=1, le=100)
+    grading_prompt: Optional[str] = None
 
 
 class AssignmentSchema(BaseModel):
@@ -815,6 +816,7 @@ class AssignmentSchema(BaseModel):
     brief_file_size: int
     max_score: int
     status: str
+    grading_prompt: Optional[str] = None
     created_at: datetime
     updated_at: datetime
     submission_count: int = 0

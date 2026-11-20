@@ -946,6 +946,7 @@ class Assignment(Base):
     max_score: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     # active | closed | archived
+    grading_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
