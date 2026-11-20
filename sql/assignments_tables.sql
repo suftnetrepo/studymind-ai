@@ -47,3 +47,59 @@ CREATE TABLE IF NOT EXISTS assignment_submissions (
 
 CREATE INDEX IF NOT EXISTS ix_assignment_submissions_assignment_id
     ON assignment_submissions(assignment_id);
+
+-- ── Idempotent ALTER TABLE to fix column types on pre-existing tables ────────
+-- These statements are safe to re-run; they no-op if the column already has
+-- the right type. They correct tables that were created manually (or by an
+-- earlier version of this file) with wrong types:
+--   score        was INTEGER  → must be FLOAT  (ORM: Float)
+--   strengths    was TEXT     → must be JSONB  (ORM: JSONB)
+--   weaknesses   was TEXT     → must be JSONB
+--   recommendations was TEXT  → must be JSONB
+
+DO $$
+BEGIN
+    -- score: INTEGER → DOUBLE PRECISION (FLOAT)
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'assignment_submissions'
+          AND column_name = 'score'
+          AND data_type = 'integer'
+    ) THEN
+        ALTER TABLE assignment_submissions ALTER COLUMN score TYPE DOUBLE PRECISION;
+    END IF;
+
+    -- strengths: TEXT → JSONB
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'assignment_submissions'
+          AND column_name = 'strengths'
+          AND data_type = 'text'
+    ) THEN
+        ALTER TABLE assignment_submissions
+            ALTER COLUMN strengths TYPE JSONB USING strengths::jsonb;
+    END IF;
+
+    -- weaknesses: TEXT → JSONB
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'assignment_submissions'
+          AND column_name = 'weaknesses'
+          AND data_type = 'text'
+    ) THEN
+        ALTER TABLE assignment_submissions
+            ALTER COLUMN weaknesses TYPE JSONB USING weaknesses::jsonb;
+    END IF;
+
+    -- recommendations: TEXT → JSONB
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'assignment_submissions'
+          AND column_name = 'recommendations'
+          AND data_type = 'text'
+    ) THEN
+        ALTER TABLE assignment_submissions
+            ALTER COLUMN recommendations TYPE JSONB USING recommendations::jsonb;
+    END IF;
+END
+$$;
