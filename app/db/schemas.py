@@ -788,3 +788,66 @@ class OutlineDocument(BaseModel):
 
 class ModuleOutline(BaseModel):
     documents: list[OutlineDocument] = []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Assignments
+# ═══════════════════════════════════════════════════════════════════════════
+
+class AssignmentCreate(BaseModel):
+    module_id: uuid.UUID
+    title: str = Field(..., min_length=2, max_length=255)
+    description: Optional[str] = None
+    due_at: datetime
+    max_score: int = Field(default=100, ge=1, le=100)
+
+
+class AssignmentSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    module_id: uuid.UUID
+    created_by: uuid.UUID
+    title: str
+    description: Optional[str] = None
+    due_at: datetime
+    brief_filename: str
+    brief_file_size: int
+    max_score: int
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    submission_count: int = 0
+    # student's own submission info (populated when fetching as student)
+    my_submission_id: Optional[uuid.UUID] = None
+    my_submission_status: Optional[str] = None
+
+
+class AssignmentDetailSchema(AssignmentSchema):
+    """Full assignment detail — includes download URL for the brief."""
+    brief_download_url: str = ""
+
+
+class SubmissionSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    assignment_id: uuid.UUID
+    student_id: uuid.UUID
+    filename: str
+    file_size: int
+    submitted_at: datetime
+    is_late: bool
+    status: str
+    score: Optional[float] = None
+    strengths: Optional[list] = None
+    weaknesses: Optional[list] = None
+    recommendations: Optional[list] = None
+    graded_at: Optional[datetime] = None
+
+
+class SubmissionDetailSchema(SubmissionSchema):
+    """Includes download URL for the submitted file."""
+    student_name: str = ""
+    student_email: str = ""
+    file_download_url: str = ""

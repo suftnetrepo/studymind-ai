@@ -906,3 +906,102 @@ class MagicToken(Base):
     )
 
     user: Mapped["User"] = relationship("User", back_populates="magic_tokens")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Assignments (Lecturer creates → Students submit → AI grades)
+# ═══════════════════════════════════════════════════════════════════════════
+
+class Assignment(Base):
+    """
+    An assignment created by a lecturer for a module.
+    The marking_scheme_* fields are private — never exposed to students.
+    """
+    __tablename__ = "assignments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    module_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("modules.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    # Assignment brief — visible to students
+    brief_cloudinary_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    brief_cloudinary_url: Mapped[str] = mapped_column(Text, nullable=False)
+    brief_filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    brief_file_size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    # Marking scheme — private (never sent to students)
+    scheme_cloudinary_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    scheme_cloudinary_url: Mapped[str] = mapped_column(Text, nullable=False)
+    scheme_filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    scheme_file_size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    max_score: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
+    # active | closed | archived
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    submissions: Mapped[list["AssignmentSubmission"]] = relationship(
+        "AssignmentSubmission", back_populates="assignment", cascade="all, delete-orphan"
+    )
+
+
+class AssignmentSubmission(Base):
+    """
+    A student's submission for an assignment.
+    Grading is performed asynchronously; status tracks progress.
+    """
+    __tablename__ = "assignment_submissions"
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "student_id", name="uq_one_submission_per_student"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("assignments.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    student_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    # Submitted file (Cloudinary)
+    cloudinary_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    cloudinary_url: Mapped[str] = mapped_column(Text, nullable=False)
+    filename: Mapped[str] = mapped_column(String(512), nullable=False)
+    file_size: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+    submitted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    is_late: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # Grading (populated after AI processing)
+    status: Mapped[str] = mapped_column(String(32), default="pending", nullable=False)
+    # pending | grading | graded | error
+
+    score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # 0–100 percentage
+
+    strengths: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    # list of strings
+    weaknesses: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    recommendations: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    grading_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # raw AI reasoning / error message
+
+    graded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    assignment: Mapped["Assignment"] = relationship("Assignment", back_populates="submissions")

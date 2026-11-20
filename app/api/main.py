@@ -28,6 +28,7 @@ from app.api.v1 import admin as v1_admin
 from app.api.v1 import documents as v1_documents
 from app.api.v1 import platform as v1_platform
 from app.api.v1 import usage_policy as v1_usage_policy
+from app.api.assignments import router as assignments_router
 from app.db.engine import create_all_tables
 from app.logging_config import configure_logging, get_logger
 from app.retrieval.typesense_client import ensure_collection, get_typesense_client
@@ -80,7 +81,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["https://learnify-lfhf.onrender.com", "https://studymind-web.onrender.com", "https://dashboard.aismartlearner.com"],
+        allow_origins=["https://learnify-lfhf.onrender.com", "https://studymind-web.onrender.com", "https://dashboard.aismartlearner.com", "https://ciquis.com", "https://www.ciquis.com"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -110,6 +111,7 @@ def create_app() -> FastAPI:
     # NOTE: the legacy unauthenticated /api/documents router is intentionally not mounted; all
     # document access goes through the authenticated /api/modules/{id}/documents endpoints.
     app.include_router(health_router)
+    app.include_router(assignments_router)
 
     return app
 
