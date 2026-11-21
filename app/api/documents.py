@@ -26,7 +26,7 @@ log      = get_logger(__name__)
 router   = APIRouter(prefix="/api/documents", tags=["documents"])
 executor = ThreadPoolExecutor(max_workers=4)
 
-MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB — matches web advertised limit
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB — indexing runs synchronously; raise once async
 
 
 def _ingest_and_persist(doc_id: str, filename: str, content: bytes) -> dict:
@@ -99,7 +99,7 @@ async def upload_document(
 
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail="File exceeds 200 MB limit")
+        raise HTTPException(status_code=413, detail="File exceeds 50 MB limit")
     if not content:
         raise HTTPException(status_code=422, detail="Uploaded file is empty")
 
