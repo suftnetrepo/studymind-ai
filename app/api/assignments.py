@@ -48,6 +48,20 @@ MAX_FILE_SIZE      = 50 * 1024 * 1024  # 50 MB
 PLATFORM = "studymind"
 
 
+async def _store(file_bytes: bytes, filename: str, course_id: str, document_id: str) -> dict:
+    """Upload to file storage; turn storage failures into clear HTTP errors instead of a bare 500."""
+    try:
+        return await storage.upload_document(
+            file_bytes, filename, platform=PLATFORM, course_id=course_id, document_id=document_id,
+        )
+    except storage.StorageNotConfigured:
+        log.error("assignment_storage_not_configured", document_id=document_id)
+        raise HTTPException(status_code=503, detail="File storage is not available right now. Please contact support.")
+    except Exception:
+        log.exception("assignment_upload_failed", document_id=document_id)
+        raise HTTPException(status_code=502, detail="The file could not be uploaded. Please try again.")
+
+
 def _ext(filename: str) -> str:
     return filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
 
@@ -153,16 +167,13 @@ async def create_assignment(
 
     assignment_id = uuid.uuid4()
 
-    brief_result  = await storage.upload_document(
-        brief_bytes, brief.filename or "brief",
-        platform=PLATFORM, course_id=str(module_id),
-        document_id=f"{assignment_id}_brief",
-    )
-    scheme_result = await storage.upload_document(
-        scheme_bytes, scheme.filename or "scheme",
-        platform=PLATFORM, course_id=str(module_id),
-        document_id=f"{assignment_id}_scheme",
-    )
+    brief_result = await _store(brief_bytes, brief.filename or "brief", str(module_id), f"{assignment_id}_brief")
+    try:
+        scheme_result = await _store(scheme_bytes, scheme.filename or "scheme", str(module_id), f"{assignment_id}_scheme")
+    except HTTPException:
+        # Don't leave the already-uploaded brief orphaned in storage (delete_document never raises).
+        await storage.delete_document(brief_result["public_id"], brief_result["secure_url"])
+        raise
 
     assignment = Assignment(
         id=assignment_id,
@@ -429,11 +440,7 @@ async def submit_assignment(
     work_bytes = await _read_upload(work)
     sub_id = uuid.uuid4()
 
-    upload_result = await storage.upload_document(
-        work_bytes, work.filename or "submission",
-        platform=PLATFORM, course_id=str(assignment.module_id),
-        document_id=f"{assignment_id}_sub_{sub_id}",
-    )
+    upload_result = await _store(work_bytes, work.filename or "submission", str(assignment.module_id), f"{assignment_id}_sub_{sub_id}")
 
     submission = AssignmentSubmission(
         id=sub_id,
