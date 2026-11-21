@@ -54,7 +54,7 @@ log      = get_logger(__name__)
 router   = APIRouter(prefix="/api", tags=["modules"])
 executor = ThreadPoolExecutor(max_workers=4)
 
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50 MB
+MAX_FILE_SIZE = 200 * 1024 * 1024  # 200 MB — matches web advertised limit
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -626,7 +626,7 @@ async def upload_module_document(
 
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=413, detail="File exceeds 50 MB limit")
+        raise HTTPException(status_code=413, detail="File exceeds 200 MB limit")
     if not content:
         raise HTTPException(status_code=422, detail="Uploaded file is empty")
 
