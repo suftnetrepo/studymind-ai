@@ -600,6 +600,139 @@ async def list_enrolled_students(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Enrolment safety: preview, leave, remove
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.get("/modules/join/preview")
+async def preview_module(
+    course_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    """Return name, lecturer and status of a module before the student commits to joining.
+
+    Accepts a UUID, a course code or an issued enrolment code — the same identifiers
+    that /modules/join accepts.  Returns 404 when nothing matches so the UI can tell
+    the student the code is wrong before they ever hit the enrol endpoint.
+    """
+    if current_user.role not in ("student", "self_learner"):
+        raise HTTPException(status_code=403, detail="Only students can preview modules")
+    identifier = course_id.strip()
+    if not identifier:
+        raise HTTPException(status_code=422, detail="course_id is required")
+
+    module: Module | None = None
+
+    # Try UUID first
+    try:
+        module_id = uuid.UUID(identifier)
+        module = (await db.execute(
+            select(Module).where(Module.id == module_id, Module.access_type != "personal")
+        )).scalar_one_or_none()
+    except ValueError:
+        pass
+
+    # Try course code
+    if module is None:
+        matches = (await db.execute(
+            select(Module).where(
+                Module.course_code == identifier.upper(),
+                Module.access_type != "personal",
+                Module.status == "active",
+            ).limit(2)
+        )).scalars().all()
+        if len(matches) == 1:
+            module = matches[0]
+        elif len(matches) > 1:
+            raise HTTPException(status_code=409, detail="Course code is ambiguous. Ask for the module UUID.")
+
+    # Try enrolment code
+    if module is None:
+        code = (await db.execute(select(InstitutionCode).where(
+            InstitutionCode.code == identifier,
+            InstitutionCode.code_type == "module_enrolment",
+            InstitutionCode.is_active == True,
+        ))).scalar_one_or_none()
+        if code:
+            linked = (code.metadata_ or {}).get("module_id")
+            if linked:
+                try:
+                    module = (await db.execute(
+                        select(Module).where(Module.id == uuid.UUID(linked))
+                    )).scalar_one_or_none()
+                except (ValueError, TypeError):
+                    pass
+
+    if module is None:
+        raise HTTPException(status_code=404, detail="Course ID not found")
+
+    # Check if already enrolled
+    existing = (await db.execute(
+        select(Enrolment).where(
+            Enrolment.module_id == module.id,
+            Enrolment.student_id == current_user.id,
+        )
+    )).scalar_one_or_none()
+
+    # Fetch lecturer name
+    owner = await db.get(User, module.owner_id)
+    lecturer_name = owner.full_name if owner else "Unknown"
+
+    return {
+        "module_id":     str(module.id),
+        "title":         module.title,
+        "description":   module.description,
+        "lecturer_name": lecturer_name,
+        "status":        module.status,
+        "already_enrolled": existing is not None,
+    }
+
+
+@router.delete("/modules/{module_id}/leave", status_code=204)
+async def leave_module(
+    module_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    """Student removes themselves from a module."""
+    if current_user.role not in ("student", "self_learner"):
+        raise HTTPException(status_code=403, detail="Only students can leave modules")
+    enrolment = (await db.execute(
+        select(Enrolment).where(
+            Enrolment.module_id == module_id,
+            Enrolment.student_id == current_user.id,
+        )
+    )).scalar_one_or_none()
+    if not enrolment:
+        raise HTTPException(status_code=404, detail="Not enrolled in this module")
+    await db.delete(enrolment)
+    await db.commit()
+    log.info("student_left_module", student_id=str(current_user.id), module_id=str(module_id))
+
+
+@router.delete("/modules/{module_id}/students/{student_id}", status_code=204)
+async def remove_student(
+    module_id: uuid.UUID,
+    student_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_lecturer),
+):
+    """Lecturer removes a student from their module."""
+    await _get_owned_module(module_id, current_user, db)
+    enrolment = (await db.execute(
+        select(Enrolment).where(
+            Enrolment.module_id == module_id,
+            Enrolment.student_id == student_id,
+        )
+    )).scalar_one_or_none()
+    if not enrolment:
+        raise HTTPException(status_code=404, detail="Student is not enrolled in this module")
+    await db.delete(enrolment)
+    await db.commit()
+    log.info("student_removed", lecturer_id=str(current_user.id), student_id=str(student_id), module_id=str(module_id))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Document Upload — DOC-01, DOC-02, DOC-03, DOC-04
 # ═══════════════════════════════════════════════════════════════════════════
 
