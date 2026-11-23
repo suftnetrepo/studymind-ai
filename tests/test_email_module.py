@@ -28,7 +28,7 @@ def use(monkeypatch, **kw):
 # ── templates ───────────────────────────────────────────────────────────────
 def test_welcome_is_role_specific_and_escapes_the_name():
     subject, html, text = welcome_email('<script>alert(1)</script> Lee', "lecturer", "https://app.example.com/")
-    assert subject == "Welcome to StudyMind"
+    assert subject == "Welcome to Ciquis"
     assert "<script>" not in html and "&lt;script&gt;" in html
     assert "Create a module" in text and "https://app.example.com/my-learning" in text
     _, _, student_text = welcome_email("Sam Student", "student", "https://app.example.com")
@@ -43,7 +43,7 @@ def test_welcome_without_app_url_has_no_link():
 def test_reset_email_contains_the_link_in_button_and_text():
     url = "https://app.example.com/my-learning/reset-password?token=abc%20d"
     subject, html, text = reset_email("Alex Rivera", url)
-    assert subject == "Reset your StudyMind password"
+    assert subject == "Reset your Ciquis password"
     assert url in text and 'href="https://app.example.com/my-learning/reset-password?token=abc%20d"' in html
     assert "30 minutes" in text and "ignore this email" in text
 
@@ -124,7 +124,7 @@ async def test_welcome_sends_when_configured_and_not_when_disabled(monkeypatch):
     monkeypatch.setattr(welcome, "send_email", send)
     use(monkeypatch, brevo_api_key="k", email_from_address="n@x.co", email_app_url="https://app.example.com")
     assert await welcome.send_welcome_email("a@b.co", "Ann Lee", "student") is True
-    assert send.await_args.args[0] == "a@b.co" and "Welcome to StudyMind" in send.await_args.args[2]
+    assert send.await_args.args[0] == "a@b.co" and "Welcome to Ciquis" in send.await_args.args[2]
     send.reset_mock()
     use(monkeypatch, brevo_api_key="k", email_from_address="n@x.co", email_welcome_enabled=False)
     assert await welcome.send_welcome_email("a@b.co", "Ann Lee", "student") is False

@@ -41,7 +41,7 @@ def email_configured() -> bool:
 async def _send_brevo(to_email: str, to_name: str, subject: str, html: str, text: str, idempotency_key: Optional[str]) -> bool:
     s = get_settings()
     payload = {
-        "sender": {"email": _from_address(), "name": s.email_from_name or "StudyMind"},
+        "sender": {"email": _from_address(), "name": s.email_from_name or "Ciquis"},
         "to": [{"email": to_email, **({"name": to_name} if to_name else {})}],
         "subject": subject,
         "htmlContent": html,
