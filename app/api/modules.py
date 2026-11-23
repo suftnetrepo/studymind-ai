@@ -111,6 +111,23 @@ async def list_semesters(
 # Modules — MOD-01, MOD-06, MOD-07
 # ═══════════════════════════════════════════════════════════════════════════
 
+# Unambiguous alphabet (no 0/O, 1/I/L) shared by enrolment codes and auto-generated join codes.
+_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+_JOIN_CODE_PREFIX = "CIQ"
+_JOIN_CODE_ATTEMPTS = 10
+
+
+async def _generate_join_code(db: AsyncSession) -> str:
+    """Return an unused short join code such as ``CIQ-X7K4``; 500 if no free code is found."""
+    for _ in range(_JOIN_CODE_ATTEMPTS):
+        code = f"{_JOIN_CODE_PREFIX}-" + "".join(secrets.choice(_CODE_ALPHABET) for _ in range(4))
+        taken = (await db.execute(select(Module.id).where(Module.course_code == code).limit(1))).first()
+        if taken is None:
+            return code
+    log.error("join_code_exhausted", attempts=_JOIN_CODE_ATTEMPTS)
+    raise HTTPException(status_code=500, detail="Could not generate a join code. Please try again.")
+
+
 @router.post("/modules", response_model=ModuleSchema, status_code=201)
 async def create_module(
     body: ModuleCreate,
@@ -131,9 +148,14 @@ async def create_module(
             detail="Students can only create personal modules (access_type=personal). Class modules are created by lecturers.",
         )
 
+    # Class modules are joined by code, so they always get one. Personal modules can't be joined.
+    course_code = body.course_code.upper() if body.course_code else None
+    if course_code is None and body.access_type != "personal":
+        course_code = await _generate_join_code(db)
+
     module = Module(
         id=uuid.uuid4(),
-        course_code=body.course_code.upper() if body.course_code else None,
+        course_code=course_code,
         title=body.title,
         description=body.description,
         owner_id=current_user.id,
@@ -287,7 +309,14 @@ async def update_module(
 ):
     module = await _get_owned_module(module_id, current_user, db)
     module.title        = body.title
-    module.course_code  = body.course_code.upper() if body.course_code else None
+    if body.course_code:
+        module.course_code = body.course_code.upper()
+    elif body.access_type != "personal":
+        # A class module always keeps a join code: a blank field must not erase one that
+        # students may already have scanned or printed.
+        module.course_code = module.course_code or await _generate_join_code(db)
+    else:
+        module.course_code = None
     module.description  = body.description
     module.access_type  = body.access_type
     module.status       = body.status
@@ -1076,8 +1105,7 @@ async def create_enrolment_code(
     if module.access_type == "personal":
         module.access_type = "class"          # personal modules can't be enrolled in
 
-    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-    code_str = (module.course_code or "MOD")[:6].upper() + "-" + "".join(secrets.choice(alphabet) for _ in range(4))
+    code_str = (module.course_code or "MOD")[:6].upper() + "-" + "".join(secrets.choice(_CODE_ALPHABET) for _ in range(4))
     db.add(InstitutionCode(
         institution_id=module.institution_id, code=code_str, code_type="module_enrolment",
         target_role="student", created_by=current_user.id, metadata_={"module_id": str(module_id)},
