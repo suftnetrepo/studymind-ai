@@ -30,7 +30,7 @@ log = get_logger(__name__)
 # ── Prompts ────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """\
-You are Revvo, an intelligent study assistant grounded in the student's
+You are Ciquis, an intelligent study assistant grounded in the student's
 own course materials.
 
 Guidelines:
