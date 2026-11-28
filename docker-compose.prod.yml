@@ -8,8 +8,11 @@ services:
       - "8108:8108"
     volumes:
       - typesense_data:/data
+    # The API key comes from TYPESENSE_API_KEY in .env.prod via env_file, which Typesense reads natively.
+    # Do not use --api-key=${TYPESENSE_API_KEY} here: Compose fills ${...} in `command` from the shell or a
+    # project .env, not from env_file, so a plain `docker compose up` produced an empty key and Typesense exited.
     env_file: .env.prod
-    command: --data-dir=/data --api-key=${TYPESENSE_API_KEY} --enable-cors
+    command: --data-dir=/data --enable-cors
 
   api:
     build:
