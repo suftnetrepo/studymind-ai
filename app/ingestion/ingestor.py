@@ -195,11 +195,17 @@ class DocumentIngestor:
             }
 
         except Exception as exc:
-            log.error("ingestion_failed", doc_id=document_id, error_type=type(exc).__name__)
+            log.error(
+                "ingestion_failed",
+                doc_id=document_id,
+                filename=filename,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return {
                 "status":      "failed",
                 "chunk_count": 0,
-                "error":       "Document indexing failed. Please try again or contact support.",
+                "error":       str(exc) or "Document indexing failed. Please try again or contact support.",
                 "chunks":      [],
                 "indexed_at":  None,
                 "sections":    [],
