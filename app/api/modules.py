@@ -904,15 +904,15 @@ async def _ingest_module_document(
     # Run ingestion in thread pool
     ingestor = get_ingestor()
     settings = get_settings()
-    loop     = asyncio.get_event_loop()
+    loop     = asyncio.get_running_loop()
 
     def _run():
         try:
             r = ingestor.ingest(filename, content, doc_id, **ingest_params)
-            log.info("ingest_result", status=r["status"], chunks=r["chunk_count"])
+            log.info("ingest_result", filename=filename, status=r["status"], chunks=r["chunk_count"])
             return r
         except Exception as e:
-            log.error("ingest_exception", error_type=type(e).__name__)
+            log.error("ingest_exception", filename=filename, error_type=type(e).__name__, error=str(e))
             raise
 
     result = await loop.run_in_executor(executor, _run)
