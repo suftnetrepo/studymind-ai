@@ -1226,8 +1226,13 @@ async def delete_module_document(
     ):
         raise HTTPException(status_code=403, detail="You can only delete your own personal notes")
 
-    ts_client = get_typesense_client()
-    delete_document_chunks(ts_client, str(document_id))
+    try:
+        ts_client = get_typesense_client()
+        delete_document_chunks(ts_client, str(document_id))
+    except Exception as exc:
+        # Chunk cleanup is best-effort: failed/unindexed documents have no chunks,
+        # and a Typesense outage should not prevent the user from removing a document.
+        log.warning("document_chunk_purge_failed", document_id=str(document_id), error=str(exc))
 
     await db.delete(md)
     await db.delete(doc)
