@@ -50,7 +50,11 @@ async def lifespan(app: FastAPI):
         ensure_collection(ts)
         log.info("typesense_collection_ready")
     except Exception as e:
-        log.warning("typesense_unavailable", error=str(e), error_type=type(e).__name__)
+        # A Typesense failure at startup means every upload will silently fail.
+        # Raise so the container exits and the restart policy surfaces the problem
+        # immediately rather than serving a broken indexing pipeline for days.
+        log.error("typesense_startup_failed", error=str(e), error_type=type(e).__name__)
+        raise RuntimeError(f"Typesense unavailable at startup: {e}") from e
 
     configure_llama_settings()
     log.info("llm_ready")
